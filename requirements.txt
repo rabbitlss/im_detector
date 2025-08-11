@@ -1,0 +1,29 @@
+# IM检测器依赖包
+
+# 核心依赖
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# API调用
+openai>=1.0.0
+requests>=2.31.0
+
+# 数据处理
+pandas>=2.0.0
+pyyaml>=6.0.0
+
+# 进度显示
+tqdm>=4.65.0
+
+# 可选加速（根据需要安装）
+# onnx>=1.14.0
+# onnxruntime-gpu>=1.15.0  # GPU加速推理
+# tensorrt>=8.6.0  # NVIDIA TensorRT加速
+
+# 开发工具（可选）
+# matplotlib>=3.7.0  # 可视化
+# seaborn>=0.12.0    # 可视化
