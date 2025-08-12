@@ -1,0 +1,291 @@
+方案2：使用conda管理 (推荐)
+
+  # 1. 安装Miniconda或Anaconda
+  # 下载：https://docs.conda.io/en/latest/miniconda.html
+
+  # 2. 创建Python 3.10环境
+  conda create -n im_detector python=3.10
+
+  # 3. 激活环境
+  conda activate im_detector
+
+  # 4. 安装PyTorch (推荐先安装)
+  # CPU版本:
+  conda install pytorch torchvision torchaudio cpuonly -c pytorch
+
+  # GPU版本 (CUDA 11.8):
+  conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+
+  # 5. 安装其他依赖
+  pip install ultralytics opencv-python openai pandas pyyaml tqdm
+
+  🚨 常见安装问题和解决方案
+
+  问题1：PyTorch安装失败
+
+  # 解决方案：手动安装PyTorch
+  # 访问 https://pytorch.org/get-started/locally/ 获取正确命令
+
+  # 示例：
+  # CUDA 11.8:
+  pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+  # CPU版本:
+  pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+  # macOS (Metal):
+  pip3 install torch torchvision torchaudio
+
+  问题2：OpenCV安装失败
+
+  # 解决方案：
+  # 方案A: 使用opencv-python-headless (无GUI依赖)
+  pip install opencv-python-headless
+
+  # 方案B: 系统级依赖
+  # Ubuntu:
+  sudo apt-get install python3-opencv
+
+  # macOS:
+  brew install opencv
+
+  问题3：Ultralytics安装失败
+
+  # 解决方案：从源码安装
+  pip install git+https://github.com/ultralytics/ultralytics.git
+
+  # 或者降级版本
+  pip install ultralytics==8.0.120
+
+  📋 完整的分步安装脚本
+
+  创建 install.sh (Linux/macOS) 或 install.bat (Windows)：
+
+  #!/bin/bash
+  # install.sh - Linux/macOS安装脚本
+
+  echo "🐍 IM检测器安装脚本"
+  echo "===================="
+
+  # 检查Python版本
+  PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+  echo "当前Python版本: $PYTHON_VERSION"
+
+  if [[ $(echo "$PYTHON_VERSION < 3.8" | bc) -eq 1 ]]; then
+      echo "❌ Python版本过低，需要3.8+"
+      exit 1
+  fi
+
+  # 创建虚拟环境
+  echo "📦 创建虚拟环境..."
+  python3 -m venv im_detector_env
+
+  # 激活环境
+  echo "🔧 激活环境..."
+  source im_detector_env/bin/activate
+
+  # 升级pip
+  echo "⬆️ 升级pip..."
+  pip install --upgrade pip
+
+  # 检测GPU
+  echo "🔍 检测GPU..."
+  if command -v nvidia-smi &> /dev/null; then
+      echo "✅ 检测到NVIDIA GPU，安装GPU版本PyTorch"
+      pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+  else
+      echo "ℹ️ 未检测到GPU，安装CPU版本PyTorch"
+      pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+  fi
+
+  # 安装其他依赖
+  echo "📚 安装其他依赖..."
+  pip install ultralytics>=8.0.0
+  pip install opencv-python>=4.8.0
+  pip install openai>=1.0.0
+  pip install numpy>=1.24.0
+  pip install Pillow>=10.0.0
+  pip install pandas>=2.0.0
+  pip install pyyaml>=6.0.0
+  pip install tqdm>=4.65.0
+
+  # 验证安装
+  echo "✅ 验证安装..."
+  python -c "
+  import torch
+  import ultralytics
+  import cv2
+  import openai
+  print('✅ 所有依赖安装成功！')
+  print(f'PyTorch版本: {torch.__version__}')
+  print(f'CUDA可用: {torch.cuda.is_available()}')
+  "
+
+  echo "🎉 安装完成！"
+  echo "激活环境: source im_detector_env/bin/activate"
+
+  🛠 Windows批处理安装脚本
+
+  @echo off
+  REM install.bat - Windows安装脚本
+
+  echo 🐍 IM检测器安装脚本
+  echo ====================
+
+  REM 检查Python
+  python --version >nul 2>&1
+  if errorlevel 1 (
+      echo ❌ 未找到Python，请先安装Python 3.10
+      echo 下载地址: https://www.python.org/downloads/
+      pause
+      exit /b 1
+  )
+
+  REM 创建虚拟环境
+  echo 📦 创建虚拟环境...
+  python -m venv im_detector_env
+
+  REM 激活环境
+  echo 🔧 激活环境...
+  call im_detector_env\Scripts\activate.bat
+
+  REM 升级pip
+  echo ⬆️ 升级pip...
+  python -m pip install --upgrade pip
+
+  REM 检测GPU
+  echo 🔍 检测GPU...
+  nvidia-smi >nul 2>&1
+  if errorlevel 1 (
+      echo ℹ️ 未检测到GPU，安装CPU版本
+      pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+  ) else (
+      echo ✅ 检测到GPU，安装GPU版本
+      pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+  )
+
+  REM 安装其他依赖
+  echo 📚 安装其他依赖...
+  pip install ultralytics opencv-python openai numpy Pillow pandas pyyaml tqdm
+
+  REM 验证安装
+  echo ✅ 验证安装...
+  python -c "import torch, ultralytics, cv2, openai; print('✅ 安装成功！')"
+
+  echo 🎉 安装完成！
+  echo 激活环境: im_detector_env\Scripts\activate.bat
+  pause
+
+  🔧 快速验证脚本
+
+  创建 verify_install.py：
+
+  #!/usr/bin/env python3
+  """验证安装是否成功"""
+
+  import sys
+
+  def check_python_version():
+      """检查Python版本"""
+      version = sys.version_info
+      print(f"Python版本: {version.major}.{version.minor}.{version.micro}")
+
+      if version.major < 3 or (version.major == 3 and version.minor < 8):
+          print("❌ Python版本过低，需要3.8+")
+          return False
+      elif version.major == 3 and version.minor >= 12:
+          print("⚠️ Python版本较新，可能有兼容性问题")
+      else:
+          print("✅ Python版本符合要求")
+
+      return True
+
+  def check_packages():
+      """检查关键包"""
+      packages = {
+          'torch': 'PyTorch',
+          'ultralytics': 'YOLO',
+          'cv2': 'OpenCV',
+          'openai': 'OpenAI API',
+          'numpy': 'NumPy',
+          'PIL': 'Pillow',
+          'pandas': 'Pandas',
+          'yaml': 'PyYAML',
+          'tqdm': 'TQDM'
+      }
+
+      success = True
+
+      for package, name in packages.items():
+          try:
+              if package == 'cv2':
+                  import cv2
+                  print(f"✅ {name}: {cv2.__version__}")
+              elif package == 'PIL':
+                  from PIL import Image
+                  print(f"✅ {name}: {Image.__version__}")
+              elif package == 'yaml':
+                  import yaml
+                  print(f"✅ {name}: 已安装")
+              else:
+                  module = __import__(package)
+                  version = getattr(module, '__version__', '未知版本')
+                  print(f"✅ {name}: {version}")
+
+          except ImportError:
+              print(f"❌ {name}: 未安装")
+              success = False
+
+      return success
+
+  def check_gpu():
+      """检查GPU支持"""
+      try:
+          import torch
+
+          if torch.cuda.is_available():
+              gpu_count = torch.cuda.device_count()
+              gpu_name = torch.cuda.get_device_name(0)
+              print(f"✅ CUDA: {gpu_count}个GPU ({gpu_name})")
+          else:
+              print("ℹ️ CUDA: 未检测到GPU，将使用CPU")
+
+      except ImportError:
+          print("❌ 无法检查GPU状态")
+
+  def main():
+      print("🔍 验证IM检测器安装环境")
+      print("=" * 30)
+
+      # 检查Python版本
+      if not check_python_version():
+          sys.exit(1)
+
+      print("\n📦 检查依赖包:")
+      if not check_packages():
+          print("\n❌ 部分依赖包未安装，请运行:")
+          print("pip install -r requirements.txt")
+          sys.exit(1)
+
+      print("\n🚀 检查GPU支持:")
+      check_gpu()
+
+      print("\n🎉 环境验证完成，可以开始使用IM检测器！")
+
+  if __name__ == "__main__":
+      main()
+
+  📊 总结建议
+
+  | 环境     | Python版本 | 安装方式  | 适用场景 |
+  |--------|----------|-------|------|
+  | 开发环境   | 3.10.x   | conda | 推荐   |
+  | 生产环境   | 3.9.x    | venv  | 稳定   |
+  | 测试环境   | 3.8.x    | pip   | 最小要求 |
+  | Docker | 3.10.x   | 容器化   | 部署   |
+
+  最佳实践：
+  1. 使用Python 3.10（兼容性最好）
+  2. 用conda管理环境（依赖冲突少）
+  3. 先装PyTorch再装其他包
+  4. 创建独立虚拟环境
