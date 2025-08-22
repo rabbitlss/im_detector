@@ -1,0 +1,71 @@
+ONNX直接推理OCR完整方案（3-10ms）
+
+  步骤1：下载模型文件
+
+  # 创建模型目录
+  mkdir -p models/ocr
+  cd models/ocr
+
+  # 1. 下载PaddleOCR的ONNX模型（最新v4版本）
+
+  # 文字检测模型（用于定位文字区域）
+  wget https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar
+  tar -xf ch_PP-OCRv4_det_infer.tar
+
+  # 文字识别模型（用于识别文字内容）  
+  wget https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_rec_infer.tar
+  tar -xf ch_PP-OCRv4_rec_infer.tar
+
+  # 方向分类模型（可选，用于旋转文字）
+  wget https://paddleocr.bj.bcebos.com/dygraph_v2.0/ch/ch_ppocr_mobile_v2.0_cls_infer.tar
+  tar -xf ch_ppocr_mobile_v2.0_cls_infer.tar
+
+  # 2. 转换为ONNX格式
+  pip install paddle2onnx
+
+  # 转换检测模型
+  paddle2onnx --model_dir ch_PP-OCRv4_det_infer \
+             --model_filename inference.pdmodel \
+             --params_filename inference.pdiparams \
+             --save_file ch_PP-OCRv4_det.onnx \
+             --opset_version 11
+
+  # 转换识别模型
+  paddle2onnx --model_dir ch_PP-OCRv4_rec_infer \
+             --model_filename inference.pdmodel \
+             --params_filename inference.pdiparams \
+             --save_file ch_PP-OCRv4_rec.onnx \
+             --opset_version 11
+
+  # 3. 下载字符字典文件
+  wget https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/release/2.7/ppocr/utils/ppocr_keys_v1.txt
+
+  步骤2：安装依赖
+
+  pip install onnxruntime-gpu  # GPU版本
+  # 或
+  pip install onnxruntime      # CPU版本
+
+  pip install opencv-python numpy pyclipper shapely
+
+  步骤3：完整实现代码
+
+⏺ Write(im_detector/ultra_fast_ocr.py)
+  ⎿  Wrote 469 lines to im_detector/ultra_fast_ocr.py
+     # -*- coding: utf-8 -*-
+     """
+     超快速ONNX OCR实现（3-10ms）
+     直接使用ONNX Runtime推理，无需深度学习框架
+     """
+     import os
+     import cv2
+     import numpy as np
+     import onnxruntime as ort
+     … +459 lines (ctrl+r to expand)
+
+⏺ Update Todos
+  ⎿  ☒ 梳理ONNX直接推理OCR完整方案
+     ☒ 提供模型下载地址和链接
+     ☒ 实现完整的预处理代码
+     ☒ 实现完整的后处理代码
+     ☒ 提供测试和验证代码
