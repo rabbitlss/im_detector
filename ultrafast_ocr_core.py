@@ -70,6 +70,14 @@ class UltraFastOCR:
             self.rec_session = ort.InferenceSession(rec_model_path, providers=providers)
             self.rec_input_name = self.rec_session.get_inputs()[0].name
             self.rec_input_shape = self.rec_session.get_inputs()[0].shape
+            
+            # 打印实际使用的Provider
+            actual_providers = self.rec_session.get_providers()
+            if 'CUDAExecutionProvider' in actual_providers:
+                print(f"✅ OCR使用GPU加速: {actual_providers[0]}")
+            else:
+                print(f"⚠️ OCR使用CPU: {actual_providers[0]}")
+                
         except Exception as e:
             raise RuntimeError(f"加载识别模型失败: {e}")
         
