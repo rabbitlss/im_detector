@@ -41,18 +41,24 @@ class IntelligentMultilineOCR:
     def __init__(self, 
                  ocr_engine,
                  max_concat_width: int = 3840,  # 增大到3840，允许更多拼接
-                 target_height: int = 48):
+                 target_height: int = 48,
+                 dynamic_width: bool = True,
+                 width_strategy: str = 'adaptive'):
         """
         初始化智能多行OCR
         
         Args:
             ocr_engine: 单行OCR引擎
-            max_concat_width: 最大拼接宽度
+            max_concat_width: 最大拼接宽度（当dynamic_width=False时使用）
             target_height: OCR模型目标高度
+            dynamic_width: 是否启用动态宽度计算
+            width_strategy: 宽度策略 ('conservative', 'balanced', 'aggressive', 'adaptive')
         """
         self.ocr = ocr_engine
         self.max_concat_width = max_concat_width
         self.target_height = target_height
+        self.dynamic_width = dynamic_width
+        self.width_strategy = width_strategy
     
     def _calculate_effective_width(self, image: np.ndarray) -> int:
         """
@@ -81,6 +87,62 @@ class IntelligentMultilineOCR:
         # 添加一些padding
         padding = 20
         return min(effective_width + padding, image.shape[1])
+    
+    def _calculate_dynamic_width(self, lines: List[LineInfo]) -> int:
+        """
+        根据文字特征动态计算最大拼接宽度
+        """
+        if not self.dynamic_width or not lines:
+            return self.max_concat_width
+        
+        # 分析文字特征
+        effective_widths = [line.effective_width for line in lines]
+        char_heights = [line.char_height for line in lines]
+        
+        avg_width = np.mean(effective_widths)
+        max_width = max(effective_widths)
+        avg_height = np.mean(char_heights)
+        
+        # 根据不同策略计算动态宽度
+        if self.width_strategy == 'conservative':
+            # 保守策略：基于平均宽度的2-3倍
+            dynamic_width = int(avg_width * 2.5)
+            
+        elif self.width_strategy == 'balanced':
+            # 平衡策略：基于平均宽度和最大宽度
+            dynamic_width = int(avg_width * 3 + (max_width - avg_width) * 0.5)
+            
+        elif self.width_strategy == 'aggressive':
+            # 激进策略：尽可能多拼接
+            dynamic_width = int(max_width * 6)  # 允许6行最宽内容拼接
+            
+        elif self.width_strategy == 'adaptive':
+            # 自适应策略：根据文字密度和OCR模型能力
+            text_density = avg_width / (avg_height * 20)  # 估算文字密度
+            
+            if text_density < 1:  # 稀疏文字
+                dynamic_width = int(avg_width * 8)  # 可以拼接更多
+            elif text_density < 2:  # 中等密度
+                dynamic_width = int(avg_width * 5)
+            else:  # 密集文字
+                dynamic_width = int(avg_width * 3)
+            
+            # 考虑OCR模型处理能力（经验值）
+            if avg_height < 20:  # 小字体，OCR处理能力强
+                dynamic_width = int(dynamic_width * 1.5)
+            elif avg_height > 60:  # 大字体，适当限制
+                dynamic_width = int(dynamic_width * 0.8)
+                
+        else:
+            dynamic_width = self.max_concat_width
+        
+        # 设置合理的上下限
+        min_width = int(max_width + 100)  # 至少能容纳最宽的一行
+        max_possible_width = 8192  # 技术上限
+        
+        dynamic_width = max(min_width, min(dynamic_width, max_possible_width))
+        
+        return dynamic_width
     
     def analyze_text_structure(self, image: np.ndarray) -> Dict:
         """
@@ -268,7 +330,10 @@ class IntelligentMultilineOCR:
         if not lines:
             return []
         
-        # 3.1 预估每行缩放后的宽度 - 使用有效宽度而不是图像宽度
+        # 3.1 动态计算最大拼接宽度
+        dynamic_max_width = self._calculate_dynamic_width(lines)
+        
+        # 3.2 预估每行缩放后的宽度 - 使用有效宽度而不是图像宽度
         estimated_widths = []
         for line in lines:
             h = line.image.shape[0]
@@ -277,7 +342,7 @@ class IntelligentMultilineOCR:
             scaled_width = int(line.effective_width * scale_ratio)
             estimated_widths.append(scaled_width)
         
-        # 3.2 智能分组策略
+        # 3.3 智能分组策略
         groups = []
         current_group = []
         current_indices = []
@@ -288,10 +353,10 @@ class IntelligentMultilineOCR:
             # 3.3 分组决策
             needed_width = width + (gap_width if current_group else 0)
             
-            # 考虑多个因素决定是否分组 - 放松限制以增加拼接效率
+            # 考虑多个因素决定是否分组 - 使用动态宽度限制
             can_group = (
-                current_width + needed_width <= self.max_concat_width and  # 宽度限制
-                len(current_group) < 15 and  # 行数限制（从6增加到15）
+                current_width + needed_width <= dynamic_max_width and  # 动态宽度限制
+                len(current_group) < 20 and  # 行数限制（进一步增加到20）
                 self._should_group_lines_relaxed(current_group, line) if current_group else True  # 放松相似性
             )
             
