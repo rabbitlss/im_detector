@@ -66,6 +66,27 @@ def create_text_with_blanks(text_lines=5, blank_lines=3):
     return img
 
 
+def create_text_with_internal_spaces():
+    """创建包含行内大量空白的测试图像"""
+    img = np.ones((200, 800, 3), dtype=np.uint8) * 255
+    
+    # 第1行：正常文字
+    cv2.putText(img, "Normal text line", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    
+    # 第2行：包含大量行内空白的文字
+    cv2.putText(img, "Text", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    cv2.putText(img, "with", (200, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    cv2.putText(img, "spaces", (400, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    
+    # 第3行：表格样式（空白分隔）
+    cv2.putText(img, "Col1", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    cv2.putText(img, "Col2", (150, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)  
+    cv2.putText(img, "Col3", (280, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    cv2.putText(img, "Col4", (410, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    
+    return img
+
+
 def test_original_method():
     """测试原始方法"""
     print("\n" + "="*70)
@@ -383,6 +404,58 @@ def test_simple_optimization():
     return results
 
 
+def test_internal_space_handling():
+    """测试行内空白处理"""
+    print("\n" + "="*70)
+    print("行内空白处理测试")
+    print("="*70)
+    
+    # 创建包含行内空白的测试图像
+    test_img = create_text_with_internal_spaces()
+    
+    # 测试不同的宽度计算方法
+    methods = ['span', 'compact', 'adaptive']
+    
+    for method in methods:
+        print(f"\n{method.upper()} 方法:")
+        print("-" * 30)
+        
+        mock_ocr = MockOCR()
+        intelligent_ocr = IntelligentMultilineOCR(
+            ocr_engine=mock_ocr,
+            dynamic_width=True,
+            width_strategy='adaptive'
+        )
+        
+        # 获取行检测结果
+        structure_info = intelligent_ocr.analyze_text_structure(test_img)
+        lines = intelligent_ocr.detect_text_lines(test_img, structure_info)
+        
+        # 手动测试每行的有效宽度计算
+        for i, line in enumerate(lines):
+            # 使用不同方法计算有效宽度
+            effective_width = intelligent_ocr._calculate_effective_width(line.image, method=method)
+            
+            # 分析空白比例
+            gray = cv2.cvtColor(line.image, cv2.COLOR_BGR2GRAY) if len(line.image.shape) == 3 else line.image
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            v_projection = np.sum(binary == 255, axis=0)
+            non_zero_cols = np.where(v_projection > 0)[0]
+            
+            if len(non_zero_cols) > 0:
+                span_width = non_zero_cols[-1] - non_zero_cols[0] + 1
+                actual_text_cols = len(non_zero_cols)
+                blank_ratio = (span_width - actual_text_cols) / span_width if span_width > 0 else 0
+                
+                print(f"  行{i+1}: 有效宽度={effective_width:3d}px, 跨度={span_width:3d}px, 文字列={actual_text_cols:3d}, 空白比例={blank_ratio:.1%}")
+            else:
+                print(f"  行{i+1}: 无文字内容")
+        
+        # 测试拼接效果
+        results = intelligent_ocr.recognize_multiline(test_img)
+        print(f"  识别结果: {len(results)}行, OCR调用: {mock_ocr.call_count}次")
+
+
 if __name__ == "__main__":
     print("智能多行OCR优化对比测试")
     print("="*80)
@@ -404,6 +477,9 @@ if __name__ == "__main__":
     
     # 6. 简化版动态策略测试
     test_simple_optimization()
+    
+    # 7. 行内空白处理测试
+    test_internal_space_handling()
     
     print("\n" + "="*80)
     print("✅ 所有测试完成！")
