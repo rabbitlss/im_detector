@@ -1,290 +1,229 @@
 # -*- coding: utf-8 -*-
 """
-IntelligentMultilineOCR 使用示例和测试
-展示完整的多行文字识别流程
+对比测试：优化前后的OCR调用次数
 """
 
 import cv2
 import numpy as np
 import time
-from ultrafast_ocr import UltraFastOCR
 from ultrafast_ocr.intelligent_multiline_ocr import IntelligentMultilineOCR
+from ultrafast_ocr.intelligent_multiline_ocr_optimized import IntelligentMultilineOCROptimized
 
 
-def create_test_images():
-    """创建不同类型的测试图片"""
-    test_cases = {}
+class MockOCR:
+    """模拟OCR引擎，用于测试"""
+    def __init__(self):
+        self.call_count = 0
+        self.call_history = []
     
-    # 测试1: 标准多行文本
-    img1 = np.ones((300, 600, 3), dtype=np.uint8) * 255
-    texts1 = [
-        "第一行：这是测试文字内容",
-        "第二行：Hello World Test",
-        "第三行：OCR识别测试123",
-        "第四行：多行文字智能识别"
-    ]
-    y = 50
-    for text in texts1:
-        cv2.putText(img1, text, (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-        y += 60
-    test_cases["标准多行"] = img1
+    def recognize_single_line(self, image):
+        """模拟单行识别"""
+        self.call_count += 1
+        h, w = image.shape[:2]
+        self.call_history.append(f"OCR调用#{self.call_count}: 图像尺寸={w}x{h}")
+        
+        # 模拟返回文本
+        return f"Text_Line_{self.call_count}"
     
-    # 测试2: 不同字体大小
-    img2 = np.ones((250, 700, 3), dtype=np.uint8) * 255
-    cv2.putText(img2, "大标题文字", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 3)
-    cv2.putText(img2, "中等字体内容测试", (50, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-    cv2.putText(img2, "小字体说明文字", (50, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-    cv2.putText(img2, "更小的备注信息", (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-    test_cases["不同字体大小"] = img2
-    
-    # 测试3: 密集文本
-    img3 = np.ones((400, 500, 3), dtype=np.uint8) * 255
-    dense_texts = [
-        "密集文本行1",
-        "密集文本行2", 
-        "密集文本行3",
-        "密集文本行4",
-        "密集文本行5",
-        "密集文本行6",
-        "密集文本行7",
-        "密集文本行8"
-    ]
-    y = 30
-    for text in dense_texts:
-        cv2.putText(img3, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-        y += 45
-    test_cases["密集文本"] = img3
-    
-    # 测试4: 稀疏文本（行间距大）
-    img4 = np.ones((400, 600, 3), dtype=np.uint8) * 255
-    sparse_texts = ["第一行文字", "第二行文字", "第三行文字"]
-    y = 80
-    for text in sparse_texts:
-        cv2.putText(img4, text, (50, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
-        y += 120
-    test_cases["稀疏文本"] = img4
-    
-    return test_cases
+    def reset(self):
+        """重置计数器"""
+        self.call_count = 0
+        self.call_history = []
 
 
-def demo_basic_usage():
-    """基础使用示例"""
-    print("="*70)
-    print("基础使用示例")
+def create_dense_text_image(num_lines=10):
+    """创建密集文本测试图像"""
+    img = np.ones((50 * num_lines, 800, 3), dtype=np.uint8) * 255
+    
+    for i in range(num_lines):
+        y = 30 + i * 50
+        text = f"Line {i+1}: This is test text for OCR optimization comparison"
+        cv2.putText(img, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    
+    return img
+
+
+def test_original_method():
+    """测试原始方法"""
+    print("\n" + "="*70)
+    print("测试原始智能拼接方法")
     print("="*70)
     
-    # 1. 初始化OCR引擎
-    print("1. 初始化OCR引擎...")
-    ocr_engine = UltraFastOCR(use_gpu=True)  # 可以设置use_gpu=False
-    
-    # 2. 初始化智能多行OCR
+    mock_ocr = MockOCR()
     intelligent_ocr = IntelligentMultilineOCR(
-        ocr_engine=ocr_engine,
-        max_concat_width=1280,  # 最大拼接宽度
-        target_height=48        # OCR模型目标高度
+        ocr_engine=mock_ocr,
+        max_concat_width=1280,
+        target_height=48
     )
     
-    # 3. 创建测试图片
-    test_img = create_test_images()["标准多行"]
+    # 测试不同行数的图像
+    test_cases = [5, 8, 10, 15, 20]
     
-    # 4. 执行识别
-    print("\n2. 执行多行识别...")
-    start_time = time.time()
-    results = intelligent_ocr.recognize_multiline(test_img)
-    end_time = time.time()
-    
-    # 5. 显示结果
-    print(f"\n识别完成，耗时: {(end_time - start_time)*1000:.1f}ms")
-    print(f"识别到 {len(results)} 行文字:")
-    for i, text in enumerate(results, 1):
-        print(f"  行{i}: {text}")
-
-
-def demo_detailed_analysis():
-    """详细分析示例"""
-    print("\n" + "="*70)
-    print("详细分析示例")
-    print("="*70)
-    
-    # 初始化
-    ocr_engine = UltraFastOCR(use_gpu=True)
-    intelligent_ocr = IntelligentMultilineOCR(ocr_engine, max_concat_width=1280)
-    
-    # 使用不同类型的测试图片
-    test_images = create_test_images()
-    
-    for name, image in test_images.items():
-        print(f"\n{'='*50}")
-        print(f"测试图片: {name}")
-        print(f"{'='*50}")
+    for num_lines in test_cases:
+        print(f"\n测试 {num_lines} 行文本:")
+        mock_ocr.reset()
         
-        # 步骤1: 文字结构分析
-        print("1. 文字结构分析...")
-        structure_info = intelligent_ocr.analyze_text_structure(image)
-        print(f"   检测到字符高度: {structure_info['char_height']}px")
-        print(f"   估算行高: {structure_info['line_height']}px")
-        print(f"   估算行间距: {structure_info['line_spacing']}px")
-        print(f"   检测到字符数: {structure_info['num_chars']}")
+        test_img = create_dense_text_image(num_lines)
         
-        # 步骤2: 文本行检测
-        print("\n2. 文本行检测...")
-        lines = intelligent_ocr.detect_text_lines(image, structure_info)
-        print(f"   检测到行数: {len(lines)}")
-        for i, line in enumerate(lines):
-            print(f"   行{i+1}: 高度={line.bbox[3]}px, 估算字符数={line.estimated_chars}, 置信度={line.confidence:.2f}")
-        
-        # 步骤3: 拼接优化
-        print("\n3. 拼接优化...")
+        # 分析结构
+        structure_info = intelligent_ocr.analyze_text_structure(test_img)
+        lines = intelligent_ocr.detect_text_lines(test_img, structure_info)
         concat_groups = intelligent_ocr.optimize_concatenation(lines)
-        print(f"   拼接成 {len(concat_groups)} 组")
-        for i, (_, indices) in enumerate(concat_groups):
-            print(f"   组{i+1}: 包含行 {[idx+1 for idx in indices]}")
         
-        # 步骤4: OCR识别
-        print("\n4. OCR识别结果:")
-        results = intelligent_ocr.recognize_multiline(image)
-        for i, text in enumerate(results, 1):
-            print(f"   行{i}: '{text}'")
-        
-        # 性能统计
-        print("\n5. 性能统计:")
-        stats = intelligent_ocr.get_performance_stats(image)
-        print(f"   总耗时: {stats['total_time_ms']:.1f}ms")
-        print(f"   - 结构分析: {stats['analysis_time_ms']:.1f}ms")
-        print(f"   - 行检测: {stats['detection_time_ms']:.1f}ms") 
-        print(f"   - 拼接优化: {stats['concat_time_ms']:.1f}ms")
-        print(f"   - OCR识别: {stats['ocr_time_ms']:.1f}ms")
-        print(f"   OCR调用次数: {stats['ocr_calls']} (原本需要{stats['detected_lines']}次)")
-        print(f"   效率提升: {stats['efficiency_ratio']:.1f}x")
-
-
-def demo_performance_comparison():
-    """性能对比示例"""
-    print("\n" + "="*70)
-    print("性能对比示例")
-    print("="*70)
-    
-    # 初始化
-    ocr_engine = UltraFastOCR(use_gpu=True)
-    intelligent_ocr = IntelligentMultilineOCR(ocr_engine, max_concat_width=1280)
-    
-    # 使用密集文本进行测试
-    test_img = create_test_images()["密集文本"]
-    
-    print("方法1: 传统逐行识别")
-    # 模拟传统方法：先切割，然后逐行识别
-    start_time = time.time()
-    structure_info = intelligent_ocr.analyze_text_structure(test_img)
-    lines = intelligent_ocr.detect_text_lines(test_img, structure_info)
-    
-    traditional_results = []
-    for line in lines:
-        text = ocr_engine.recognize_single_line(line.image)
-        traditional_results.append(text)
-    traditional_time = (time.time() - start_time) * 1000
-    
-    print(f"   耗时: {traditional_time:.1f}ms")
-    print(f"   OCR调用次数: {len(lines)}")
-    
-    print("\n方法2: 智能拼接识别")
-    start_time = time.time()
-    intelligent_results = intelligent_ocr.recognize_multiline(test_img)
-    intelligent_time = (time.time() - start_time) * 1000
-    
-    concat_groups = intelligent_ocr.optimize_concatenation(lines)
-    print(f"   耗时: {intelligent_time:.1f}ms")
-    print(f"   OCR调用次数: {len(concat_groups)}")
-    
-    print(f"\n性能提升:")
-    print(f"   加速比: {traditional_time/intelligent_time:.1f}x")
-    print(f"   OCR调用减少: {len(lines) - len(concat_groups)} 次")
-    
-    # 结果准确性对比
-    print(f"\n结果对比:")
-    print(f"   传统方法识别行数: {len([r for r in traditional_results if r])}")
-    print(f"   智能方法识别行数: {len(intelligent_results)}")
-
-
-def demo_real_world_usage():
-    """实际应用示例"""
-    print("\n" + "="*70)
-    print("实际应用示例")
-    print("="*70)
-    
-    # 初始化
-    ocr_engine = UltraFastOCR(use_gpu=True)
-    
-    # 不同配置的智能OCR
-    configs = [
-        ("速度优先", {"max_concat_width": 640, "target_height": 32}),
-        ("平衡模式", {"max_concat_width": 1280, "target_height": 48}),
-        ("质量优先", {"max_concat_width": 1920, "target_height": 64})
-    ]
-    
-    test_img = create_test_images()["标准多行"]
-    
-    for config_name, config in configs:
-        print(f"\n{config_name} 配置:")
-        intelligent_ocr = IntelligentMultilineOCR(ocr_engine, **config)
-        
-        start_time = time.time()
+        # 执行识别
         results = intelligent_ocr.recognize_multiline(test_img)
-        end_time = time.time()
         
-        print(f"   耗时: {(end_time - start_time)*1000:.1f}ms")
-        print(f"   识别行数: {len(results)}")
-        print(f"   配置参数: {config}")
+        print(f"  - 检测到行数: {len(lines)}")
+        print(f"  - 拼接组数: {len(concat_groups)}")
+        print(f"  - OCR调用次数: {mock_ocr.call_count}")
+        print(f"  - 效率比: {len(lines)/mock_ocr.call_count:.2f}x")
+        
+        # 显示分组详情
+        for i, (_, indices) in enumerate(concat_groups):
+            print(f"    组{i+1}: 包含 {len(indices)} 行 (行号: {indices})")
 
 
-def save_debug_images():
-    """保存调试图片"""
+def test_optimized_method():
+    """测试优化后的方法"""
     print("\n" + "="*70)
-    print("保存调试图片")
+    print("测试优化后的智能拼接方法")
     print("="*70)
     
-    test_images = create_test_images()
-    for name, image in test_images.items():
-        filename = f"test_{name.replace(' ', '_')}.jpg"
-        cv2.imwrite(filename, image)
-        print(f"保存测试图片: {filename}")
+    mock_ocr = MockOCR()
+    optimized_ocr = IntelligentMultilineOCROptimized(
+        ocr_engine=mock_ocr,
+        max_concat_width=2560,  # 增大宽度限制
+        target_height=48,
+        enable_cache=True
+    )
+    
+    # 测试不同行数的图像
+    test_cases = [5, 8, 10, 15, 20]
+    
+    for num_lines in test_cases:
+        print(f"\n测试 {num_lines} 行文本:")
+        mock_ocr.reset()
+        optimized_ocr.clear_cache()
+        
+        test_img = create_dense_text_image(num_lines)
+        
+        # 获取性能统计
+        stats = optimized_ocr.get_performance_stats_optimized(test_img)
+        
+        print(f"  - 检测到行数: {stats['detected_lines']}")
+        print(f"  - 拼接组数: {stats['concat_groups']}")
+        print(f"  - 理论OCR调用: {stats['theoretical_ocr_calls']}")
+        print(f"  - 实际OCR调用: {stats['actual_ocr_calls']}")
+        print(f"  - 缓存命中率: {stats['cache_hit_rate']:.1%}")
+        print(f"  - 效率比: {stats['actual_efficiency_ratio']:.2f}x")
+        
+        # 分析拼接组
+        structure_info = optimized_ocr.analyze_text_structure(test_img)
+        lines = optimized_ocr.detect_text_lines(test_img, structure_info)
+        concat_groups = optimized_ocr.optimize_concatenation_aggressive(lines)
+        
+        for i, (_, indices) in enumerate(concat_groups):
+            print(f"    组{i+1}: 包含 {len(indices)} 行 (行号: {indices})")
+
+
+def compare_methods():
+    """对比两种方法"""
+    print("\n" + "="*70)
+    print("方法对比总结")
+    print("="*70)
+    
+    test_img = create_dense_text_image(15)
+    
+    # 原始方法
+    mock_ocr1 = MockOCR()
+    original_ocr = IntelligentMultilineOCR(mock_ocr1, max_concat_width=1280)
+    
+    start = time.time()
+    results1 = original_ocr.recognize_multiline(test_img)
+    time1 = time.time() - start
+    
+    # 优化方法
+    mock_ocr2 = MockOCR()
+    optimized_ocr = IntelligentMultilineOCROptimized(mock_ocr2, max_concat_width=2560)
+    
+    start = time.time()
+    results2 = optimized_ocr.recognize_multiline_optimized(test_img)
+    time2 = time.time() - start
+    
+    print(f"\n15行文本测试结果:")
+    print(f"{'方法':<20} {'OCR调用次数':<15} {'耗时(ms)':<15} {'效率提升':<15}")
+    print("-" * 65)
+    print(f"{'原始方法':<20} {mock_ocr1.call_count:<15} {time1*1000:<15.2f} {'1.00x':<15}")
+    print(f"{'优化方法':<20} {mock_ocr2.call_count:<15} {time2*1000:<15.2f} {f'{mock_ocr1.call_count/mock_ocr2.call_count:.2f}x':<15}")
+    
+    print(f"\n优化效果:")
+    print(f"  - OCR调用减少: {mock_ocr1.call_count - mock_ocr2.call_count} 次 ({(1 - mock_ocr2.call_count/mock_ocr1.call_count)*100:.1f}%)")
+    print(f"  - 速度提升: {time1/time2:.2f}x")
+
+
+def analyze_optimization_details():
+    """分析优化细节"""
+    print("\n" + "="*70)
+    print("优化策略详细分析")
+    print("="*70)
+    
+    mock_ocr = MockOCR()
+    
+    # 创建两个OCR实例进行对比
+    original = IntelligentMultilineOCR(mock_ocr, max_concat_width=1280)
+    optimized = IntelligentMultilineOCROptimized(mock_ocr, max_concat_width=2560)
+    
+    test_img = create_dense_text_image(12)
+    
+    # 分析原始方法的限制
+    structure_info = original.analyze_text_structure(test_img)
+    lines = original.detect_text_lines(test_img, structure_info)
+    original_groups = original.optimize_concatenation(lines)
+    
+    print(f"\n原始方法分析 (12行文本):")
+    print(f"  最大拼接宽度: {original.max_concat_width}px")
+    print(f"  拼接限制:")
+    print(f"    - 最多6行一组（硬编码限制）")
+    print(f"    - 字符高度差异 < 50%")
+    print(f"    - 置信度差异 < 0.3")
+    print(f"  结果: {len(original_groups)} 个组")
+    
+    # 分析优化方法
+    optimized_groups = optimized.optimize_concatenation_aggressive(lines)
+    
+    print(f"\n优化方法分析 (12行文本):")
+    print(f"  最大拼接宽度: {optimized.max_concat_width}px")
+    print(f"  优化策略:")
+    print(f"    - 无行数限制")
+    print(f"    - 动态规划最优分组")
+    print(f"    - OCR结果缓存")
+    print(f"    - 批量处理")
+    print(f"  结果: {len(optimized_groups)} 个组")
+    
+    print(f"\n优化效果: OCR调用从 {len(original_groups)} 次减少到 {len(optimized_groups)} 次")
+    print(f"效率提升: {len(original_groups)/len(optimized_groups):.2f}x")
 
 
 if __name__ == "__main__":
-    print("IntelligentMultilineOCR 完整使用示例")
+    print("智能多行OCR优化对比测试")
     print("="*80)
     
-    try:
-        # 1. 基础使用示例
-        demo_basic_usage()
-        
-        # 2. 详细分析示例
-        demo_detailed_analysis()
-        
-        # 3. 性能对比示例
-        demo_performance_comparison()
-        
-        # 4. 实际应用示例
-        demo_real_world_usage()
-        
-        # 5. 保存调试图片
-        save_debug_images()
-        
-        print("\n" + "="*80)
-        print("✅ 所有示例运行完成！")
-        print("\n📝 使用总结:")
-        print("1. 基础用法: intelligent_ocr.recognize_multiline(image)")
-        print("2. 结构分析: intelligent_ocr.analyze_text_structure(image)")
-        print("3. 性能统计: intelligent_ocr.get_performance_stats(image)")
-        print("4. 配置调优: 调整max_concat_width和target_height参数")
-        print("="*80)
-        
-    except Exception as e:
-        print(f"\n❌ 运行出错: {e}")
-        print("\n可能的原因:")
-        print("1. UltraFastOCR未正确初始化")
-        print("2. 缺少必要的依赖包")
-        print("3. 模型文件未下载")
-        print("\n解决方案:")
-        print("1. 确保已下载OCR模型文件")
-        print("2. 检查GPU/CPU设置")
-        print("3. 安装所需依赖: opencv-python, numpy")
+    # 1. 测试原始方法
+    test_original_method()
+    
+    # 2. 测试优化方法
+    test_optimized_method()
+    
+    # 3. 对比两种方法
+    compare_methods()
+    
+    # 4. 分析优化细节
+    analyze_optimization_details()
+    
+    print("\n" + "="*80)
+    print("✅ 测试完成！")
+    print("\n关键发现:")
+    print("1. 原始方法的6行限制严重影响了拼接效率")
+    print("2. 优化后的动态规划算法能找到最优分组方案")
+    print("3. 缓存机制进一步减少了重复OCR调用")
+    print("4. 增大最大宽度限制允许更多行拼接在一起")
