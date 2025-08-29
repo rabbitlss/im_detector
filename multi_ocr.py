@@ -438,9 +438,24 @@ class IntelligentMultilineOCR:
         concat_groups = self.optimize_concatenation(lines)
         concat_time = time.time() - start_time - analysis_time - detection_time
         
-        # OCR识别
+        # OCR识别 - 只执行OCR部分，不重复前面的步骤
         ocr_start = time.time()
-        results = self.recognize_multiline(image)
+        all_results = [''] * len(lines)
+        
+        for concat_img, indices in concat_groups:
+            if len(indices) == 1:
+                # 单行直接识别
+                text = self.ocr.recognize_single_line(concat_img)
+                all_results[indices[0]] = text
+            else:
+                # 多行拼接识别后分割
+                combined_text = self.ocr.recognize_single_line(concat_img)
+                split_texts = self._split_concatenated_result(combined_text, len(indices))
+                
+                for idx, text in zip(indices, split_texts):
+                    all_results[idx] = text
+        
+        results = [r for r in all_results if r]  # 过滤空结果
         ocr_time = time.time() - ocr_start
         
         total_time = time.time() - start_time
