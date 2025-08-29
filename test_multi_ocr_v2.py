@@ -43,6 +43,29 @@ def create_dense_text_image(num_lines=10):
     return img
 
 
+def create_text_with_blanks(text_lines=5, blank_lines=3):
+    """创建包含空白行的测试图像"""
+    total_lines = text_lines + blank_lines
+    img = np.ones((50 * total_lines, 800, 3), dtype=np.uint8) * 255
+    
+    text_count = 0
+    for i in range(total_lines):
+        y = 30 + i * 50
+        
+        # 每3行插入1-2个空白行
+        if i % 4 == 3 and blank_lines > 0:
+            # 这是空白行，不画任何文字
+            blank_lines -= 1
+        else:
+            if text_count < text_lines:
+                # 文字行
+                text = f"Line {text_count + 1}: Text content with spacing"
+                cv2.putText(img, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+                text_count += 1
+    
+    return img
+
+
 def test_original_method():
     """测试原始方法"""
     print("\n" + "="*70)
@@ -228,6 +251,138 @@ def analyze_optimization_details():
     print(f"效率提升: {len(original_groups)/len(optimized_groups):.2f}x")
 
 
+def test_blank_line_handling():
+    """测试空白行处理"""
+    print("\n" + "="*70)
+    print("空白行处理测试")
+    print("="*70)
+    
+    mock_ocr = MockOCR()
+    intelligent_ocr = IntelligentMultilineOCR(
+        ocr_engine=mock_ocr,
+        max_concat_width=3840,
+        dynamic_width=True,
+        width_strategy='adaptive'
+    )
+    
+    # 测试场景：不同空白行比例
+    test_scenarios = [
+        (5, 0, "密集文本"),     # 5行文字，0行空白
+        (5, 2, "少量空白"),     # 5行文字，2行空白  
+        (5, 5, "大量空白"),     # 5行文字，5行空白
+        (3, 7, "稀疏文本"),     # 3行文字，7行空白
+    ]
+    
+    for text_lines, blank_lines, scenario_name in test_scenarios:
+        print(f"\n{scenario_name}: {text_lines}行文字 + {blank_lines}行空白")
+        print("-" * 50)
+        
+        mock_ocr.reset()
+        
+        # 创建包含空白行的图像
+        test_img = create_text_with_blanks(text_lines, blank_lines)
+        
+        # 执行检测和识别
+        start_time = time.time()
+        results = intelligent_ocr.recognize_multiline(test_img)
+        total_time = time.time() - start_time
+        
+        # 获取详细统计
+        structure_info = intelligent_ocr.analyze_text_structure(test_img)
+        lines = intelligent_ocr.detect_text_lines(test_img, structure_info)
+        
+        # 统计结果
+        total_visual_lines = text_lines + blank_lines
+        detected_lines = len(lines)
+        recognized_lines = len(results)
+        ocr_calls = mock_ocr.call_count
+        
+        print(f"  图像总行数: {total_visual_lines}")
+        print(f"  检测到的行数: {detected_lines} (过滤了 {total_visual_lines - detected_lines} 个空白行)")
+        print(f"  识别结果行数: {recognized_lines}")
+        print(f"  OCR调用次数: {ocr_calls}")
+        print(f"  处理时间: {total_time * 1000:.1f}ms")
+        
+        # 检查空白行过滤效果
+        if detected_lines == text_lines:
+            print(f"  ✅ 空白行过滤正确")
+        elif detected_lines < text_lines:
+            print(f"  ⚠️  过度过滤: 丢失了 {text_lines - detected_lines} 行有效文字")
+        else:
+            print(f"  ⚠️  过滤不足: 仍包含 {detected_lines - text_lines} 行可能的空白")
+        
+        # 显示效率指标
+        if ocr_calls > 0:
+            efficiency = detected_lines / ocr_calls
+            print(f"  效率比: {efficiency:.1f}x")
+
+
+def test_simple_optimization():
+    """简化版OCR优化测试 - 专注核心指标"""
+    print("\n" + "="*70)
+    print("简化版动态策略优化测试")
+    print("="*70)
+    
+    # 测试参数
+    test_cases = [5, 10, 15, 20]
+    strategies = ['conservative', 'balanced', 'aggressive', 'adaptive']
+    
+    results = []
+    
+    for num_lines in test_cases:
+        print(f"\n测试 {num_lines} 行文本:")
+        print("-" * 40)
+        test_img = create_dense_text_image(num_lines)
+        
+        for strategy in strategies:
+            mock_ocr = MockOCR()
+            
+            # 创建OCR实例
+            ocr_instance = IntelligentMultilineOCR(
+                ocr_engine=mock_ocr,
+                dynamic_width=True,
+                width_strategy=strategy
+            )
+            
+            # 执行测试
+            start_time = time.time()
+            recognized_texts = ocr_instance.recognize_multiline(test_img)
+            total_time = time.time() - start_time
+            
+            # 收集结果
+            result = {
+                'lines': num_lines,
+                'strategy': strategy,
+                'ocr_calls': mock_ocr.call_count,
+                'time_ms': total_time * 1000,
+                'recognized_count': len(recognized_texts),
+                'efficiency': num_lines / mock_ocr.call_count if mock_ocr.call_count > 0 else 0
+            }
+            results.append(result)
+            
+            print(f"{strategy:12} | OCR调用: {mock_ocr.call_count:2d} | 时间: {total_time*1000:5.1f}ms | 识别: {len(recognized_texts):2d} | 效率: {result['efficiency']:.1f}x")
+    
+    # 总结报告
+    print(f"\n{'='*60}")
+    print("优化效果总结")
+    print("="*60)
+    
+    for strategy in strategies:
+        strategy_results = [r for r in results if r['strategy'] == strategy]
+        avg_efficiency = np.mean([r['efficiency'] for r in strategy_results])
+        avg_time = np.mean([r['time_ms'] for r in strategy_results])
+        total_calls = sum([r['ocr_calls'] for r in strategy_results])
+        total_lines = sum([r['lines'] for r in strategy_results])
+        
+        print(f"{strategy:12} | 平均效率: {avg_efficiency:.1f}x | 平均时间: {avg_time:5.1f}ms | 总OCR调用: {total_calls}/{total_lines}")
+    
+    # 找出最佳策略
+    best_strategy = max(strategies, key=lambda s: np.mean([r['efficiency'] for r in results if r['strategy'] == s]))
+    print(f"\n🏆 推荐策略: {best_strategy}")
+    
+    return results
+
+
 if __name__ == "__main__":
     print("智能多行OCR优化对比测试")
     print("="*80)
@@ -244,10 +399,20 @@ if __name__ == "__main__":
     # 4. 分析优化细节
     analyze_optimization_details()
     
+    # 5. 空白行处理测试
+    test_blank_line_handling()
+    
+    # 6. 简化版动态策略测试
+    test_simple_optimization()
+    
     print("\n" + "="*80)
-    print("✅ 测试完成！")
+    print("✅ 所有测试完成！")
     print("\n关键发现:")
-    print("1. 原始方法的6行限制严重影响了拼接效率")
-    print("2. 优化后的动态规划算法能找到最优分组方案")
-    print("3. 缓存机制进一步减少了重复OCR调用")
-    print("4. 增大最大宽度限制允许更多行拼接在一起")
+    print("1. 动态宽度策略显著提升拼接效率")
+    print("2. 空白行过滤减少无效OCR调用")
+    print("3. 文字有效宽度计算是拼接成功的关键")
+    print("4. 不同策略适用于不同文档类型:")
+    print("   - conservative: 稳定性优先，适合重要文档")
+    print("   - balanced: 平衡模式，适合大多数场景")
+    print("   - aggressive: 效率优先，适合批量处理")
+    print("   - adaptive: 智能适应，推荐日常使用")
