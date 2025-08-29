@@ -78,9 +78,33 @@ def test_original_method():
         print(f"  - OCR调用次数: {mock_ocr.call_count}")
         print(f"  - 效率比: {len(lines)/mock_ocr.call_count:.2f}x")
         
+        # 调试：显示每行的有效宽度
+        print(f"  - 每行有效宽度: {[getattr(line, 'effective_width', 'N/A') for line in lines]}")
+        
         # 显示分组详情
         for i, (_, indices) in enumerate(concat_groups):
             print(f"    组{i+1}: 包含 {len(indices)} 行 (行号: {indices})")
+            
+        # 调试：如果所有组都是单行，分析原因
+        if all(len(indices) == 1 for _, indices in concat_groups):
+            print(f"  ⚠️  警告：所有组都是单行，拼接失败！")
+            if len(lines) > 1:
+                # 分析前两行为什么不能拼接
+                line1, line2 = lines[0], lines[1]
+                print(f"    第1行有效宽度: {getattr(line1, 'effective_width', 'N/A')}")
+                print(f"    第2行有效宽度: {getattr(line2, 'effective_width', 'N/A')}")
+                
+                # 计算拼接宽度
+                if hasattr(line1, 'effective_width') and hasattr(line2, 'effective_width'):
+                    h1, h2 = line1.image.shape[0], line2.image.shape[0]
+                    scale1 = 48 / h1 if h1 > 0 else 1.0
+                    scale2 = 48 / h2 if h2 > 0 else 1.0
+                    scaled_w1 = int(line1.effective_width * scale1)
+                    scaled_w2 = int(line2.effective_width * scale2)
+                    total_width = scaled_w1 + 20 + scaled_w2
+                    print(f"    拼接宽度估算: {scaled_w1} + 20 + {scaled_w2} = {total_width}")
+                    print(f"    最大允许宽度: {intelligent_ocr.max_concat_width}")
+                    print(f"    宽度检查: {'通过' if total_width <= intelligent_ocr.max_concat_width else '失败'}")
 
 
 def test_optimized_method():
