@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-优化版智能多行OCR系统
-通过智能缓存和批量处理策略大幅减少OCR调用次数
+智能多行OCR系统
+完整的文字检测、分析、切割、拼接、识别流程
+只使用单行识别模型，通过图像处理实现多行识别
 """
 
 import cv2
@@ -9,7 +10,6 @@ import numpy as np
 import time
 from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
-import hashlib
 
 
 @dataclass
@@ -31,68 +31,67 @@ class LineInfo:
     estimated_chars: int
     char_height: int
     char_width_avg: float
-    confidence: float
-    image_hash: str = None  # 图像哈希，用于缓存
+    confidence: float  # 这是一行的置信度
+    effective_width: int = 0  # 文字的有效宽度（非空白部分）
 
 
-class IntelligentMultilineOCROptimized:
-    """优化版智能多行OCR系统 - 最大化减少OCR调用"""
+class IntelligentMultilineOCR:
+    """智能多行OCR系统"""
     
     def __init__(self, 
                  ocr_engine,
-                 max_concat_width: int = 2560,  # 增大最大宽度
-                 target_height: int = 48,
-                 enable_cache: bool = True):
+                 max_concat_width: int = 1280,
+                 target_height: int = 48):
         """
         初始化智能多行OCR
         
         Args:
             ocr_engine: 单行OCR引擎
-            max_concat_width: 最大拼接宽度（增大到2560）
+            max_concat_width: 最大拼接宽度
             target_height: OCR模型目标高度
-            enable_cache: 是否启用缓存
         """
         self.ocr = ocr_engine
         self.max_concat_width = max_concat_width
         self.target_height = target_height
-        self.enable_cache = enable_cache
-        
-        # OCR结果缓存
-        self.ocr_cache = {}
-        self.cache_hits = 0
-        self.cache_misses = 0
-        
-        # 批量处理缓存
-        self.batch_cache = {}
     
-    def _compute_image_hash(self, image: np.ndarray) -> str:
-        """计算图像的哈希值用于缓存"""
-        # 使用快速哈希算法
-        return hashlib.md5(image.tobytes()).hexdigest()
-    
-    def _ocr_with_cache(self, image: np.ndarray) -> str:
-        """带缓存的OCR识别"""
-        if not self.enable_cache:
-            return self.ocr.recognize_single_line(image)
+    def _calculate_effective_width(self, image: np.ndarray) -> int:
+        """
+        计算图像中文字的有效宽度（非空白部分）
+        """
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
         
-        # 计算图像哈希
-        img_hash = self._compute_image_hash(image)
+        # 二值化找到文字区域
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
-        # 检查缓存
-        if img_hash in self.ocr_cache:
-            self.cache_hits += 1
-            return self.ocr_cache[img_hash]
+        # 垂直投影，找到有文字的列
+        v_projection = np.sum(binary == 255, axis=0)
         
-        # 缓存未命中，执行OCR
-        self.cache_misses += 1
-        result = self.ocr.recognize_single_line(image)
-        self.ocr_cache[img_hash] = result
+        # 找到第一个和最后一个有文字的列
+        non_zero_cols = np.where(v_projection > 0)[0]
         
-        return result
+        if len(non_zero_cols) == 0:
+            return image.shape[1]  # 如果没有文字，返回整个宽度
+        
+        # 有效宽度 = 最右列 - 最左列 + padding
+        effective_width = non_zero_cols[-1] - non_zero_cols[0] + 1
+        
+        # 添加一些padding
+        padding = 20
+        return min(effective_width + padding, image.shape[1])
     
     def analyze_text_structure(self, image: np.ndarray) -> Dict:
         """
         步骤1: 分析图像中的文字结构
+        通过图像变换识别出文字区域，检测文字大小和像素特征
+        
+        Args:
+            image: 输入图像
+            
+        Returns:
+            文字结构分析结果
         """
         # 1.1 预处理
         if len(image.shape) == 3:
@@ -100,22 +99,26 @@ class IntelligentMultilineOCROptimized:
         else:
             gray = image.copy()
         
-        # 1.2 二值化
+        # 1.2 二值化 - 突出文字区域
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
-        # 1.3 形态学操作
+        # 1.3 形态学操作 - 连接同一行的字符
         kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
         connected_text = cv2.dilate(binary, kernel_horizontal, iterations=1)
         
-        # 1.4 连通组件分析
+        # 1.4 连通组件分析 - 找到所有文字块
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
         
         # 1.5 提取有效文字区域
         text_regions = []
-        for i in range(1, num_labels):
+        for i in range(1, num_labels):  # 跳过背景
             x, y, w, h, area = stats[i]
             
-            if (area > 20 and h > 5 and w > 3 and 0.1 < h/w < 10):
+            # 过滤条件：面积、宽高比、尺寸
+            if (area > 20 and 
+                h > 5 and w > 3 and 
+                0.1 < h/w < 10):  # 合理的宽高比
+                
                 region = TextRegion(
                     bbox=(x, y, w, h),
                     area=area,
@@ -136,10 +139,12 @@ class IntelligentMultilineOCROptimized:
                 'num_chars': 0
             }
         
+        # 字符高度分析
         heights = [r.height for r in text_regions]
         char_height = int(np.median(heights))
         char_height_std = int(np.std(heights))
         
+        # 行高和行间距估算
         line_height = int(char_height * 1.2)
         line_spacing = max(5, int(char_height * 0.3))
         
@@ -155,7 +160,15 @@ class IntelligentMultilineOCROptimized:
     
     def detect_text_lines(self, image: np.ndarray, structure_info: Dict) -> List[LineInfo]:
         """
-        步骤2: 检测和切割文本行
+        步骤2: 基于结构分析结果，智能检测和切割文本行
+        根据文字大小决定切割成几行
+        
+        Args:
+            image: 输入图像
+            structure_info: 文字结构信息
+            
+        Returns:
+            检测到的文本行列表
         """
         char_height = structure_info['char_height']
         line_spacing = structure_info['line_spacing']
@@ -170,7 +183,10 @@ class IntelligentMultilineOCROptimized:
         h_projection = np.sum(binary == 255, axis=1)
         
         # 2.2 动态阈值检测行边界
+        # 基于字符高度设置最小行高
         min_line_height = max(8, int(char_height * 0.6))
+        
+        # 基于行间距设置合并阈值  
         merge_threshold = max(3, int(line_spacing * 0.8))
         
         # 2.3 检测行边界
@@ -178,6 +194,7 @@ class IntelligentMultilineOCROptimized:
         in_line = False
         start_y = 0
         
+        # 使用自适应阈值（基于投影的统计特征）
         proj_threshold = max(1, int(np.mean(h_projection[h_projection > 0]) * 0.1))
         
         for y in range(len(h_projection)):
@@ -189,6 +206,7 @@ class IntelligentMultilineOCROptimized:
                     line_ranges.append((start_y, y))
                 in_line = False
         
+        # 处理最后一行
         if in_line and len(h_projection) - start_y >= min_line_height:
             line_ranges.append((start_y, len(h_projection)))
         
@@ -198,6 +216,7 @@ class IntelligentMultilineOCROptimized:
         # 2.5 创建LineInfo对象
         lines = []
         for i, (start_y, end_y) in enumerate(merged_ranges):
+            # 添加适当边距
             padding = max(2, char_height // 8)
             y1 = max(0, start_y - padding)
             y2 = min(image.shape[0], end_y + padding)
@@ -205,19 +224,22 @@ class IntelligentMultilineOCROptimized:
             line_img = image[y1:y2, :]
             if line_img.size == 0:
                 continue
-            
+                
+            # 分析这一行的特征
             line_height = y2 - y1
             line_width = image.shape[1]
             
-            avg_char_width = char_height * 0.8
-            estimated_chars = max(1, int(line_width / avg_char_width))
+            # 关键：计算文字的有效宽度
+            effective_width = self._calculate_effective_width(line_img)
             
+            # 估算字符数量 - 使用有效宽度而不是整个图像宽度
+            avg_char_width = char_height * 0.8  # 估算字符宽度
+            estimated_chars = max(1, int(effective_width / avg_char_width))
+            
+            # 计算置信度（基于投影强度和高度一致性）
             line_projection_sum = np.sum(h_projection[start_y:end_y])
             max_possible_sum = (end_y - start_y) * line_width
             confidence = min(1.0, line_projection_sum / max_possible_sum) if max_possible_sum > 0 else 0.5
-            
-            # 计算图像哈希
-            img_hash = self._compute_image_hash(line_img) if self.enable_cache else None
             
             line_info = LineInfo(
                 image=line_img,
@@ -226,165 +248,112 @@ class IntelligentMultilineOCROptimized:
                 char_height=char_height,
                 char_width_avg=avg_char_width,
                 confidence=confidence,
-                image_hash=img_hash
+                effective_width=effective_width  # 保存有效宽度
             )
             lines.append(line_info)
         
         return lines
     
-    def optimize_concatenation_aggressive(self, lines: List[LineInfo]) -> List[Tuple[np.ndarray, List[int]]]:
+    def optimize_concatenation(self, lines: List[LineInfo]) -> List[Tuple[np.ndarray, List[int]]]:
         """
-        步骤3: 激进的拼接优化策略 - 最大化减少OCR调用
+        步骤3: 智能拼接优化
+        根据文字特征决定最佳拼接策略
         
-        策略：
-        1. 移除行数限制
-        2. 放宽相似性约束
-        3. 充分利用最大宽度
-        4. 使用动态分组算法
+        Args:
+            lines: 文本行列表
+            
+        Returns:
+            [(拼接后的图片, 原始行索引列表), ...]
         """
         if not lines:
             return []
         
-        # 预估每行缩放后的宽度
+        # 3.1 预估每行缩放后的宽度 - 使用有效宽度而不是图像宽度
         estimated_widths = []
         for line in lines:
-            h, w = line.image.shape[:2]
+            h = line.image.shape[0]
             scale_ratio = self.target_height / h if h > 0 else 1.0
-            scaled_width = int(w * scale_ratio)
+            # 关键修改：使用有效宽度而不是图像宽度
+            scaled_width = int(line.effective_width * scale_ratio)
             estimated_widths.append(scaled_width)
         
-        # 使用动态规划找到最优分组
-        groups = self._dynamic_grouping(lines, estimated_widths)
-        
-        return groups
-    
-    def _dynamic_grouping(self, lines: List[LineInfo], widths: List[int]) -> List[Tuple[np.ndarray, List[int]]]:
-        """
-        动态规划算法：找到最少的OCR调用次数
-        """
-        n = len(lines)
-        gap_width = 20
-        
-        # dp[i] = (最少组数, 分组方案)
-        dp = [(float('inf'), [])] * (n + 1)
-        dp[0] = (0, [])
-        
-        for i in range(n):
-            if dp[i][0] == float('inf'):
-                continue
-            
-            current_width = 0
-            for j in range(i, n):
-                # 计算将lines[i:j+1]作为一组的宽度
-                if j == i:
-                    current_width = widths[j]
-                else:
-                    current_width += gap_width + widths[j]
-                
-                # 检查是否超过最大宽度
-                if current_width > self.max_concat_width:
-                    break
-                
-                # 更新dp[j+1]
-                new_groups = dp[i][0] + 1
-                if new_groups < dp[j + 1][0]:
-                    new_plan = dp[i][1] + [(i, j + 1)]
-                    dp[j + 1] = (new_groups, new_plan)
-        
-        # 构建最终的分组
+        # 3.2 智能分组策略
         groups = []
-        for start, end in dp[n][1]:
-            group_lines = lines[start:end]
-            group_indices = list(range(start, end))
-            concat_img = self._create_concatenated_image(group_lines)
-            groups.append((concat_img, group_indices))
+        current_group = []
+        current_indices = []
+        current_width = 0
+        gap_width = 20  # 行间分隔符宽度
+        
+        for i, (line, width) in enumerate(zip(lines, estimated_widths)):
+            # 3.3 分组决策
+            needed_width = width + (gap_width if current_group else 0)
+            
+            # 考虑多个因素决定是否分组 - 放松限制以增加拼接效率
+            can_group = (
+                current_width + needed_width <= self.max_concat_width and  # 宽度限制
+                len(current_group) < 15 and  # 行数限制（从6增加到15）
+                self._should_group_lines_relaxed(current_group, line) if current_group else True  # 放松相似性
+            )
+            
+            if can_group:
+                current_group.append(line)
+                current_indices.append(i)
+                current_width += needed_width
+            else:
+                # 保存当前组
+                if current_group:
+                    concat_img = self._create_concatenated_image(current_group)
+                    groups.append((concat_img, current_indices))
+                
+                # 开始新组
+                current_group = [line]
+                current_indices = [i]
+                current_width = width
+        
+        # 保存最后一组
+        if current_group:
+            concat_img = self._create_concatenated_image(current_group)
+            groups.append((concat_img, current_indices))
         
         return groups
     
-    def _batch_ocr_processing(self, groups: List[Tuple[np.ndarray, List[int]]]) -> Dict[int, str]:
+    def _should_group_lines(self, current_group: List[LineInfo], new_line: LineInfo) -> bool:
         """
-        批量OCR处理，使用缓存优化
+        判断是否应该将新行加入当前组
+        基于字符高度、密度等相似性
         """
-        results = {}
+        if not current_group:
+            return True
         
-        # 批量处理所有组
-        for concat_img, indices in groups:
-            # 使用缓存的OCR
-            combined_text = self._ocr_with_cache(concat_img)
-            
-            if len(indices) == 1:
-                results[indices[0]] = combined_text
-            else:
-                # 智能分割结果
-                split_texts = self._intelligent_split(combined_text, len(indices))
-                for idx, text in zip(indices, split_texts):
-                    results[idx] = text
+        # 获取当前组的平均特征
+        avg_char_height = np.mean([line.char_height for line in current_group])
+        avg_confidence = np.mean([line.confidence for line in current_group])
         
-        return results
+        # 相似性检查
+        height_similarity = abs(new_line.char_height - avg_char_height) / avg_char_height < 0.5
+        confidence_similarity = abs(new_line.confidence - avg_confidence) < 0.3
+        
+        return height_similarity and confidence_similarity
     
-    def _intelligent_split(self, combined_text: str, num_parts: int) -> List[str]:
+    def _should_group_lines_relaxed(self, current_group: List[LineInfo], new_line: LineInfo) -> bool:
         """
-        改进的智能分割算法
+        放松的行分组判断 - 增加拼接概率
         """
-        if not combined_text:
-            return [''] * num_parts
+        if not current_group:
+            return True
         
-        # 尝试多种分隔符
-        separators = ['|', '｜', 'l', '丨', ' | ', '  ', '\t']
-        for sep in separators:
-            if combined_text.count(sep) >= num_parts - 1:
-                parts = combined_text.split(sep)
-                # 清理并返回正确数量的部分
-                cleaned = [p.strip() for p in parts if p.strip()]
-                if len(cleaned) >= num_parts:
-                    return cleaned[:num_parts]
-                elif len(cleaned) > 0:
-                    # 补齐缺失的部分
-                    return cleaned + [''] * (num_parts - len(cleaned))
+        # 更宽松的条件
+        avg_char_height = np.mean([line.char_height for line in current_group])
         
-        # 基于长度均分
-        if len(combined_text) >= num_parts:
-            avg_len = len(combined_text) // num_parts
-            parts = []
-            for i in range(num_parts):
-                start = i * avg_len
-                end = start + avg_len if i < num_parts - 1 else len(combined_text)
-                parts.append(combined_text[start:end].strip())
-            return parts
+        # 只检查字符高度，允许更大的差异
+        height_similarity = abs(new_line.char_height - avg_char_height) / avg_char_height < 1.0  # 从0.5放松到1.0
         
-        # 默认处理
-        return [combined_text] + [''] * (num_parts - 1)
-    
-    def recognize_multiline_optimized(self, image: np.ndarray) -> List[str]:
-        """
-        优化的多行识别流程 - 最少OCR调用
-        """
-        # 步骤1: 分析文字结构
-        structure_info = self.analyze_text_structure(image)
-        
-        # 步骤2: 检测和切割文本行
-        lines = self.detect_text_lines(image, structure_info)
-        
-        if not lines:
-            return []
-        
-        # 步骤3: 激进的拼接优化
-        concat_groups = self.optimize_concatenation_aggressive(lines)
-        
-        # 步骤4: 批量OCR处理（使用缓存）
-        results_dict = self._batch_ocr_processing(concat_groups)
-        
-        # 按顺序返回结果
-        results = []
-        for i in range(len(lines)):
-            if i in results_dict:
-                results.append(results_dict[i])
-        
-        return [r for r in results if r]
+        return height_similarity
     
     def _create_concatenated_image(self, lines: List[LineInfo]) -> np.ndarray:
         """创建拼接图像"""
         if len(lines) == 1:
+            # 单行：直接缩放到目标高度
             h, w = lines[0].image.shape[:2]
             if h != self.target_height:
                 scale = self.target_height / h
@@ -392,7 +361,7 @@ class IntelligentMultilineOCROptimized:
                 return cv2.resize(lines[0].image, (new_w, self.target_height))
             return lines[0].image
         
-        # 多行拼接
+        # 多行：缩放后拼接
         resized_lines = []
         for line in lines:
             h, w = line.image.shape[:2]
@@ -403,9 +372,10 @@ class IntelligentMultilineOCROptimized:
         
         # 创建分隔符
         gap = np.ones((self.target_height, 20, 3), dtype=np.uint8) * 255
+        # 绘制细分割线
         cv2.line(gap, (10, 0), (10, self.target_height), (200, 200, 200), 1)
         
-        # 拼接
+        # 拼接所有部分
         parts = []
         for i, line in enumerate(resized_lines):
             parts.append(line)
@@ -434,12 +404,77 @@ class IntelligentMultilineOCROptimized:
         merged.append((current_start, current_end))
         return merged
     
-    def get_performance_stats_optimized(self, image: np.ndarray) -> Dict:
-        """获取优化后的性能统计信息"""
-        # 重置缓存统计
-        self.cache_hits = 0
-        self.cache_misses = 0
+    def recognize_multiline(self, image: np.ndarray) -> List[str]:
+        """
+        完整的多行识别流程
         
+        Args:
+            image: 输入图像
+            
+        Returns:
+            识别结果列表
+        """
+        # 步骤1: 分析文字结构
+        structure_info = self.analyze_text_structure(image)
+        
+        # 步骤2: 检测和切割文本行
+        lines = self.detect_text_lines(image, structure_info)
+        
+        if not lines:
+            return []
+        
+        # 步骤3: 智能拼接优化
+        concat_groups = self.optimize_concatenation(lines)
+        
+        # 步骤4: OCR识别
+        all_results = [''] * len(lines)
+        
+        for concat_img, indices in concat_groups:
+            if len(indices) == 1:
+                # 单行直接识别
+                text = self.ocr.recognize_single_line(concat_img)
+                all_results[indices[0]] = text
+            else:
+                # 多行拼接识别后分割
+                combined_text = self.ocr.recognize_single_line(concat_img)
+                split_texts = self._split_concatenated_result(combined_text, len(indices))
+                
+                for idx, text in zip(indices, split_texts):
+                    all_results[idx] = text
+        
+        return [r for r in all_results if r]  # 过滤空结果
+    
+    def _split_concatenated_result(self, combined_text: str, num_parts: int) -> List[str]:
+        """
+        分割拼接后的识别结果
+        尝试多种分割策略
+        """
+        if not combined_text:
+            return [''] * num_parts
+        
+        # 策略1: 基于分隔符分割
+        separators = ['|', '｜', 'l', '丨', ' | ']
+        for sep in separators:
+            if sep in combined_text:
+                parts = combined_text.split(sep)
+                if len(parts) == num_parts:
+                    return [p.strip() for p in parts]
+        
+        # 策略2: 智能分割（基于字符密度）
+        if len(combined_text) > num_parts * 2:
+            avg_len = len(combined_text) // num_parts
+            parts = []
+            for i in range(num_parts):
+                start = i * avg_len
+                end = start + avg_len if i < num_parts - 1 else len(combined_text)
+                parts.append(combined_text[start:end].strip())
+            return parts
+        
+        # 策略3: 单字符分配
+        return [combined_text] + [''] * (num_parts - 1)
+    
+    def get_performance_stats(self, image: np.ndarray) -> Dict:
+        """获取性能统计信息"""
         start_time = time.time()
         
         # 执行完整流程
@@ -449,21 +484,30 @@ class IntelligentMultilineOCROptimized:
         lines = self.detect_text_lines(image, structure_info)
         detection_time = time.time() - start_time - analysis_time
         
-        concat_groups = self.optimize_concatenation_aggressive(lines)
+        concat_groups = self.optimize_concatenation(lines)
         concat_time = time.time() - start_time - analysis_time - detection_time
         
-        # OCR识别
+        # OCR识别 - 只执行OCR部分，不重复前面的步骤
         ocr_start = time.time()
-        results_dict = self._batch_ocr_processing(concat_groups)
-        results = [results_dict.get(i, '') for i in range(len(lines))]
-        results = [r for r in results if r]
+        all_results = [''] * len(lines)
+        
+        for concat_img, indices in concat_groups:
+            if len(indices) == 1:
+                # 单行直接识别
+                text = self.ocr.recognize_single_line(concat_img)
+                all_results[indices[0]] = text
+            else:
+                # 多行拼接识别后分割
+                combined_text = self.ocr.recognize_single_line(concat_img)
+                split_texts = self._split_concatenated_result(combined_text, len(indices))
+                
+                for idx, text in zip(indices, split_texts):
+                    all_results[idx] = text
+        
+        results = [r for r in all_results if r]  # 过滤空结果
         ocr_time = time.time() - ocr_start
         
         total_time = time.time() - start_time
-        
-        # 计算实际的OCR调用次数（考虑缓存）
-        actual_ocr_calls = self.cache_misses
-        theoretical_calls = len(concat_groups)
         
         return {
             'total_time_ms': total_time * 1000,
@@ -473,31 +517,25 @@ class IntelligentMultilineOCROptimized:
             'ocr_time_ms': ocr_time * 1000,
             'detected_lines': len(lines),
             'concat_groups': len(concat_groups),
-            'theoretical_ocr_calls': theoretical_calls,
-            'actual_ocr_calls': actual_ocr_calls,
-            'cache_hits': self.cache_hits,
-            'cache_misses': self.cache_misses,
-            'cache_hit_rate': self.cache_hits / (self.cache_hits + self.cache_misses) if (self.cache_hits + self.cache_misses) > 0 else 0,
-            'efficiency_ratio': len(lines) / theoretical_calls if theoretical_calls else 1,
-            'actual_efficiency_ratio': len(lines) / actual_ocr_calls if actual_ocr_calls else 1,
+            'ocr_calls': len(concat_groups),
+            'efficiency_ratio': len(lines) / len(concat_groups) if concat_groups else 1,
             'structure_info': structure_info,
             'results': results
         }
-    
-    def clear_cache(self):
-        """清空缓存"""
-        self.ocr_cache.clear()
-        self.batch_cache.clear()
-        self.cache_hits = 0
-        self.cache_misses = 0
 
 
 if __name__ == "__main__":
-    print("优化版智能多行OCR系统")
+    print("智能多行OCR系统测试")
     print("="*70)
-    print("核心优化策略：")
-    print("1. ✅ 激进的拼接策略 - 最大化利用宽度限制")
-    print("2. ✅ 动态规划分组 - 找到最少OCR调用方案")
-    print("3. ✅ OCR结果缓存 - 避免重复识别相同图像")
-    print("4. ✅ 批量处理优化 - 减少接口调用开销")
-    print("5. ✅ 智能结果分割 - 准确拆分拼接结果")
+    
+    # 这里需要实际的OCR引擎来测试
+    # from ultrafast_ocr import UltraFastOCR
+    # ocr = UltraFastOCR()
+    # intelligent_ocr = IntelligentMultilineOCR(ocr)
+    
+    print("系统设计完成，包含以下核心模块：")
+    print("1. ✅ 图像变换与文字区域检测")
+    print("2. ✅ 文字大小和像素特征分析") 
+    print("3. ✅ 智能行检测和切割")
+    print("4. ✅ 自适应拼接优化")
+    print("5. ✅ 单行OCR识别集成")
