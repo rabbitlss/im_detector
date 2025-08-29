@@ -52,7 +52,7 @@ def test_original_method():
     mock_ocr = MockOCR()
     intelligent_ocr = IntelligentMultilineOCR(
         ocr_engine=mock_ocr,
-        max_concat_width=1280,
+        max_concat_width=3840,  # 增大宽度限制
         target_height=48
     )
     
@@ -160,7 +160,7 @@ def compare_methods():
     
     # 原始方法
     mock_ocr1 = MockOCR()
-    original_ocr = IntelligentMultilineOCR(mock_ocr1, max_concat_width=1280)
+    original_ocr = IntelligentMultilineOCR(mock_ocr1, max_concat_width=3840)
     
     start = time.time()
     results1 = original_ocr.recognize_multiline(test_img)
@@ -194,7 +194,7 @@ def analyze_optimization_details():
     mock_ocr = MockOCR()
     
     # 创建两个OCR实例进行对比
-    original = IntelligentMultilineOCR(mock_ocr, max_concat_width=1280)
+    original = IntelligentMultilineOCR(mock_ocr, max_concat_width=3840)
     optimized = IntelligentMultilineOCROptimized(mock_ocr, max_concat_width=2560)
     
     test_img = create_dense_text_image(12)
