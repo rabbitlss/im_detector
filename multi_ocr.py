@@ -40,7 +40,7 @@ class IntelligentMultilineOCR:
     
     def __init__(self, 
                  ocr_engine,
-                 max_concat_width: int = 1280,
+                 max_concat_width: int = 3840,  # 增大到3840，允许更多拼接
                  target_height: int = 48):
         """
         初始化智能多行OCR
