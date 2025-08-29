@@ -33,6 +33,7 @@ class LineInfo:
     char_width_avg: float
     confidence: float  # 这是一行的置信度
     effective_width: int = 0  # 文字的有效宽度（非空白部分）
+    text_density: float = 0.0  # 文字像素密度
 
 
 class IntelligentMultilineOCR:
@@ -294,6 +295,26 @@ class IntelligentMultilineOCR:
             # 关键：计算文字的有效宽度
             effective_width = self._calculate_effective_width(line_img)
             
+            # 跳过空白行：有效宽度太小的行
+            min_effective_width = char_height  # 至少要有一个字符的宽度
+            if effective_width < min_effective_width:
+                continue  # 跳过空白行
+            
+            # 额外检查：计算行中实际的文字像素密度
+            if len(line_img.shape) == 3:
+                gray_line = cv2.cvtColor(line_img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray_line = line_img.copy()
+            _, binary_line = cv2.threshold(gray_line, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            text_pixels = np.sum(binary_line == 255)
+            total_pixels = binary_line.size
+            text_density = text_pixels / total_pixels if total_pixels > 0 else 0
+            
+            # 跳过文字密度过低的行（主要是空白行）
+            min_text_density = 0.01  # 至少1%的像素是文字
+            if text_density < min_text_density:
+                continue  # 跳过空白行
+            
             # 估算字符数量 - 使用有效宽度而不是整个图像宽度
             avg_char_width = char_height * 0.8  # 估算字符宽度
             estimated_chars = max(1, int(effective_width / avg_char_width))
@@ -310,7 +331,8 @@ class IntelligentMultilineOCR:
                 char_height=char_height,
                 char_width_avg=avg_char_width,
                 confidence=confidence,
-                effective_width=effective_width  # 保存有效宽度
+                effective_width=effective_width,  # 保存有效宽度
+                text_density=text_density  # 保存文字密度用于调试
             )
             lines.append(line_info)
         
