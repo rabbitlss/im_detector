@@ -61,9 +61,16 @@ class IntelligentMultilineOCR:
         self.dynamic_width = dynamic_width
         self.width_strategy = width_strategy
     
-    def _calculate_effective_width(self, image: np.ndarray) -> int:
+    def _calculate_effective_width(self, image: np.ndarray, method: str = 'span') -> int:
         """
         计算图像中文字的有效宽度（非空白部分）
+        
+        Args:
+            image: 输入图像
+            method: 计算方法
+                - 'span': 跨度法，从第一个字符到最后一个字符（包含行内空白）
+                - 'compact': 紧凑法，只计算实际文字宽度（排除大段空白）
+                - 'adaptive': 自适应法，根据空白分布智能选择
         """
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -82,10 +89,33 @@ class IntelligentMultilineOCR:
         if len(non_zero_cols) == 0:
             return image.shape[1]  # 如果没有文字，返回整个宽度
         
-        # 有效宽度 = 最右列 - 最左列 + padding
-        effective_width = non_zero_cols[-1] - non_zero_cols[0] + 1
+        if method == 'span':
+            # 跨度法：从第一个字符到最后一个字符（原始方法）
+            effective_width = non_zero_cols[-1] - non_zero_cols[0] + 1
+            
+        elif method == 'compact':
+            # 紧凑法：只计算实际有文字的列数
+            effective_width = len(non_zero_cols)
+            
+        elif method == 'adaptive':
+            # 自适应法：分析空白分布，智能选择方法
+            total_span = non_zero_cols[-1] - non_zero_cols[0] + 1
+            actual_text_cols = len(non_zero_cols)
+            
+            # 计算空白比例
+            blank_ratio = (total_span - actual_text_cols) / total_span if total_span > 0 else 0
+            
+            if blank_ratio > 0.3:  # 如果空白超过30%，使用紧凑法
+                effective_width = actual_text_cols * 1.2  # 稍微放宽以包含合理的字符间距
+            else:  # 否则使用跨度法
+                effective_width = total_span
+                
+            effective_width = int(effective_width)
+        else:
+            # 默认使用跨度法
+            effective_width = non_zero_cols[-1] - non_zero_cols[0] + 1
         
-        # 添加一些padding
+        # 添加padding
         padding = 20
         return min(effective_width + padding, image.shape[1])
     
@@ -292,8 +322,8 @@ class IntelligentMultilineOCR:
             line_height = y2 - y1
             line_width = image.shape[1]
             
-            # 关键：计算文字的有效宽度
-            effective_width = self._calculate_effective_width(line_img)
+            # 关键：计算文字的有效宽度 - 使用自适应方法处理行内空白
+            effective_width = self._calculate_effective_width(line_img, method='adaptive')
             
             # 跳过空白行：有效宽度太小的行
             min_effective_width = char_height  # 至少要有一个字符的宽度
