@@ -30,16 +30,18 @@ class UltraFastOCR:
                  rec_model_path: Optional[str] = None,
                  dict_path: Optional[str] = None,
                  use_gpu: bool = True,
-                 providers: Optional[List[str]] = None):
+                 providers: Optional[List[str]] = None,
+                 enable_detection: bool = True):
         """
         初始化OCR引擎
         
         Args:
-            det_model_path: 检测模型路径(可选)
+            det_model_path: 检测模型路径
             rec_model_path: 识别模型路径
             dict_path: 字符字典路径
             use_gpu: 是否使用GPU
             providers: ONNX Runtime providers
+            enable_detection: 是否启用检测模型（用于多行文字）
         """
         
         # 设置providers
@@ -81,14 +83,23 @@ class UltraFastOCR:
         except Exception as e:
             raise RuntimeError(f"加载识别模型失败: {e}")
         
-        # 加载检测模型(可选)
+        # 加载检测模型(用于多行文字识别)
         self.det_session = None
-        if det_model_path and os.path.exists(det_model_path):
-            try:
-                self.det_session = ort.InferenceSession(det_model_path, providers=providers)
-                self.det_input_name = self.det_session.get_inputs()[0].name
-            except Exception as e:
-                print(f"⚠️ 检测模型加载失败: {e}")
+        self.enable_detection = enable_detection
+        
+        if enable_detection:
+            if det_model_path and os.path.exists(det_model_path):
+                try:
+                    self.det_session = ort.InferenceSession(det_model_path, providers=providers)
+                    self.det_input_name = self.det_session.get_inputs()[0].name
+                    self.det_input_shape = self.det_session.get_inputs()[0].shape
+                    print(f"✅ 检测模型加载成功，支持多行文字识别")
+                except Exception as e:
+                    print(f"⚠️ 检测模型加载失败: {e}")
+                    print(f"   将退化为单行识别模式")
+            else:
+                print(f"⚠️ 检测模型路径无效: {det_model_path}")
+                print(f"   多行文字识别功能不可用")
         
         # 预热模型
         self._warmup()
@@ -175,66 +186,124 @@ class UltraFastOCR:
     
     def recognize_multiline(self, 
                           image: np.ndarray,
-                          return_boxes: bool = False) -> List:
+                          return_boxes: bool = False,
+                          return_confidence: bool = False,
+                          min_confidence: float = 0.5,
+                          sort_output: bool = True) -> List:
         """
-        识别多行文字
+        识别多行文字（完整的检测+识别流程）
         
         Args:
             image: 输入图片
             return_boxes: 是否返回文字框坐标
+            return_confidence: 是否返回置信度
+            min_confidence: 最小置信度阈值
+            sort_output: 是否按位置排序（从上到下，从左到右）
             
         Returns:
-            文字列表或[(文字, 置信度, 坐标), ...]
+            根据参数返回不同格式：
+            - 默认: ['文字1', '文字2', ...]
+            - return_boxes=True: [('文字', 置信度, [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]), ...]
+            - return_confidence=True: [('文字', 置信度), ...]
         """
+        # 检查是否有检测模型
         if self.det_session is None:
-            # 没有检测模型，当作单行处理
-            text = self.recognize_single_line(image)
-            if return_boxes:
-                h, w = image.shape[:2]
-                return [(text, 0.8, [[0, 0], [w, 0], [w, h], [0, h]])]
+            # 没有检测模型，退化为单行处理
+            print("⚠️ 无检测模型，使用单行识别模式")
+            if return_confidence:
+                text, conf = self.recognize_single_line(image, return_confidence=True)
+                if text and conf >= min_confidence:
+                    if return_boxes:
+                        h, w = image.shape[:2]
+                        return [(text, conf, [[0, 0], [w, 0], [w, h], [0, h]])]
+                    else:
+                        return [(text, conf)]
             else:
-                return [text] if text else []
-        
-        try:
-            # 文字检测
-            det_input, ratio = self.preprocessor.preprocess_for_detection(image)
-            det_outputs = self.det_session.run(None, {self.det_input_name: det_input})
-            boxes = self.preprocessor.decode_detection(det_outputs[0], ratio)
-            
-            # 逐个识别
-            results = []
-            for box in boxes:
-                # 获取ROI
-                x_coords = box[:, 0]
-                y_coords = box[:, 1]
-                x_min, x_max = int(min(x_coords)), int(max(x_coords))
-                y_min, y_max = int(min(y_coords)), int(max(y_coords))
-                
-                # 边界检查
-                h, w = image.shape[:2]
-                x_min = max(0, min(x_min, w))
-                x_max = max(0, min(x_max, w))
-                y_min = max(0, min(y_min, h))
-                y_max = max(0, min(y_max, h))
-                
-                if x_max <= x_min or y_max <= y_min:
-                    continue
-                
-                roi = image[y_min:y_max, x_min:x_max]
-                
-                # 识别文字
-                text, confidence = self.recognize_single_line(roi, return_confidence=True)
-                
+                text = self.recognize_single_line(image)
                 if text:
                     if return_boxes:
+                        h, w = image.shape[:2]
+                        return [(text, 0.95, [[0, 0], [w, 0], [w, h], [0, h]])]
+                    else:
+                        return [text]
+            return []
+        
+        start_time = time.time()
+        
+        try:
+            # ========== 步骤1: 文字检测 ==========
+            print("🔍 执行文字检测...")
+            det_start = time.time()
+            
+            # 预处理图片用于检测
+            det_input, ratio = self.preprocessor.preprocess_for_detection(image)
+            
+            # 运行检测模型
+            det_outputs = self.det_session.run(None, {self.det_input_name: det_input})
+            
+            # 解码检测结果
+            boxes = self.preprocessor.decode_detection(det_outputs[0], ratio)
+            
+            det_time = (time.time() - det_start) * 1000
+            print(f"   检测到 {len(boxes)} 个文字区域 ({det_time:.1f}ms)")
+            
+            if not boxes:
+                print("   未检测到文字区域")
+                return []
+            
+            # ========== 步骤2: 排序检测框 ==========
+            if sort_output and len(boxes) > 1:
+                # 按y坐标(从上到下)，然后x坐标(从左到右)排序
+                sorted_boxes = []
+                for box in boxes:
+                    # 计算中心点
+                    center_x = np.mean(box[:, 0])
+                    center_y = np.mean(box[:, 1])
+                    sorted_boxes.append((center_y, center_x, box))
+                
+                # 排序：先按y，再按x
+                sorted_boxes.sort(key=lambda x: (x[0], x[1]))
+                boxes = [item[2] for item in sorted_boxes]
+            
+            # ========== 步骤3: 逐行识别 ==========
+            print(f"📖 识别 {len(boxes)} 行文字...")
+            rec_start = time.time()
+            
+            results = []
+            for i, box in enumerate(boxes):
+                # 裁剪文字区域
+                roi = self.preprocessor.crop_image_by_box(image, box)
+                
+                if roi.size == 0:
+                    continue
+                
+                # 识别单行文字
+                text, confidence = self.recognize_single_line(roi, return_confidence=True)
+                
+                # 过滤低置信度结果
+                if text and confidence >= min_confidence:
+                    # 根据参数返回不同格式
+                    if return_boxes:
                         results.append((text, confidence, box.tolist()))
+                    elif return_confidence:
+                        results.append((text, confidence))
                     else:
                         results.append(text)
+                    
+                    print(f"   行{i+1}: '{text[:30]}...' (置信度: {confidence:.3f})")
+            
+            rec_time = (time.time() - rec_start) * 1000
+            total_time = (time.time() - start_time) * 1000
+            
+            print(f"   识别完成 ({rec_time:.1f}ms)")
+            print(f"✅ 多行识别总耗时: {total_time:.1f}ms")
             
             return results
             
         except Exception as e:
             print(f"❌ 多行识别失败: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def recognize(self, 
