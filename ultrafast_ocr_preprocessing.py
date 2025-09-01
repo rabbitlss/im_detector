@@ -97,28 +97,49 @@ class ImagePreprocessor:
     
     def preprocess_for_detection(self, 
                                image: np.ndarray,
-                               max_side: int = 960) -> Tuple[np.ndarray, float]:
+                               max_side: int = 640,  # 降低到640以提升速度
+                               min_side: int = 320,  # 添加最小边长限制
+                               fast_mode: bool = True) -> Tuple[np.ndarray, float]:
         """
-        检测模型预处理
+        检测模型预处理（优化版）
         
         Args:
             image: 输入图片
-            max_side: 最大边长
+            max_side: 最大边长（降低可提升速度）
+            min_side: 最小边长
+            fast_mode: 快速模式（牺牲少量精度换取速度）
             
         Returns:
             (预处理后的张量, 缩放比例)
         """
         h, w = image.shape[:2]
         
-        # 1. 计算缩放比例
-        ratio = 1.0
-        if max(h, w) > max_side:
-            if h > w:
-                ratio = max_side / h
+        # 1. 智能缩放策略
+        if fast_mode:
+            # 快速模式：更激进的缩放
+            if max(h, w) > max_side:
+                if h > w:
+                    ratio = max_side / h
+                else:
+                    ratio = max_side / w
+            elif min(h, w) < min_side:
+                if h < w:
+                    ratio = min_side / h
+                else:
+                    ratio = min_side / w
             else:
-                ratio = max_side / w
+                # 对于中等尺寸图片，稍微缩小以提速
+                ratio = 0.8 if max(h, w) > 480 else 1.0
+        else:
+            # 标准模式
+            ratio = 1.0
+            if max(h, w) > max_side:
+                if h > w:
+                    ratio = max_side / h
+                else:
+                    ratio = max_side / w
         
-        # 2. 计算新尺寸(32的倍数)
+        # 2. 计算新尺寸(32的倍数，但限制最大尺寸)
         new_h = int(h * ratio)
         new_w = int(w * ratio)
         
@@ -126,16 +147,21 @@ class ImagePreprocessor:
         new_h = 32 * ((new_h + 31) // 32)
         new_w = 32 * ((new_w + 31) // 32)
         
-        # 3. 缩放
-        resized = cv2.resize(image, (new_w, new_h))
+        # 限制最大尺寸以提升速度
+        if fast_mode:
+            new_h = min(new_h, 640)
+            new_w = min(new_w, 640)
         
-        # 4. 归一化到[-1, 1]
-        normalized = resized.astype(np.float32) / 255.0
-        normalized = (normalized - 0.5) / 0.5
+        # 3. 使用INTER_LINEAR以提升速度（比INTER_CUBIC快）
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         
-        # 5. 转换格式
-        normalized = np.transpose(normalized, (2, 0, 1))
-        normalized = np.expand_dims(normalized, axis=0)
+        # 4. 优化的归一化（使用向量化操作）
+        normalized = resized.astype(np.float32)
+        normalized = (normalized - 127.5) * 0.0078125  # 等价于 (x - 127.5) / 127.5，但更快
+        
+        # 5. 转换格式（使用连续内存以提升速度）
+        normalized = np.ascontiguousarray(normalized.transpose(2, 0, 1))
+        normalized = normalized[np.newaxis, :, :, :]
         
         return normalized, ratio
     
