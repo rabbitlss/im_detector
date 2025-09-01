@@ -31,7 +31,8 @@ class UltraFastOCR:
                  dict_path: Optional[str] = None,
                  use_gpu: bool = True,
                  providers: Optional[List[str]] = None,
-                 enable_detection: bool = True):
+                 enable_detection: bool = True,
+                 fast_mode: bool = True):
         """
         初始化OCR引擎
         
@@ -42,6 +43,7 @@ class UltraFastOCR:
             use_gpu: 是否使用GPU
             providers: ONNX Runtime providers
             enable_detection: 是否启用检测模型（用于多行文字）
+            fast_mode: 快速模式（牺牲少量精度换取速度）
         """
         
         # 设置providers
@@ -86,14 +88,24 @@ class UltraFastOCR:
         # 加载检测模型(用于多行文字识别)
         self.det_session = None
         self.enable_detection = enable_detection
+        self.fast_mode = fast_mode
         
         if enable_detection:
             if det_model_path and os.path.exists(det_model_path):
                 try:
-                    self.det_session = ort.InferenceSession(det_model_path, providers=providers)
+                    # 为检测模型设置优化的session选项
+                    sess_options = ort.SessionOptions()
+                    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    sess_options.inter_op_num_threads = 4  # 限制线程数以提升效率
+                    sess_options.intra_op_num_threads = 4
+                    
+                    self.det_session = ort.InferenceSession(det_model_path, sess_options, providers=providers)
                     self.det_input_name = self.det_session.get_inputs()[0].name
                     self.det_input_shape = self.det_session.get_inputs()[0].shape
-                    print(f"✅ 检测模型加载成功，支持多行文字识别")
+                    
+                    mode_desc = "快速模式" if self.fast_mode else "标准模式"
+                    print(f"✅ 检测模型加载成功，支持多行文字识别 ({mode_desc})")
                 except Exception as e:
                     print(f"⚠️ 检测模型加载失败: {e}")
                     print(f"   将退化为单行识别模式")
@@ -235,8 +247,12 @@ class UltraFastOCR:
             print("🔍 执行文字检测...")
             det_start = time.time()
             
-            # 预处理图片用于检测
-            det_input, ratio = self.preprocessor.preprocess_for_detection(image)
+            # 预处理图片用于检测（使用快速模式）
+            det_input, ratio = self.preprocessor.preprocess_for_detection(
+                image, 
+                max_side=640 if self.fast_mode else 960,
+                fast_mode=self.fast_mode
+            )
             
             # 运行检测模型
             det_outputs = self.det_session.run(None, {self.det_input_name: det_input})
