@@ -121,13 +121,12 @@ def test_direct_text_regions():
     print(f"批处理图像尺寸: {batch_image.shape}")
     print(f"包含区域数: {len(region_mappings)}")
     
-    # 执行OCR识别
-    results = batch_processor.simulate_ocr_recognition(batch_image, region_mappings)
+    # 执行OCR识别（返回文本列表）
+    text_results = batch_processor.batch_ocr_recognition(batch_image, region_mappings)
     
     print("\n识别结果:")
-    for result in results:
-        print(f"  {result.region_id}: {result.text_content}")
-        print(f"    置信度: {result.confidence:.3f}")
+    for i, (text, mapping) in enumerate(zip(text_results, region_mappings)):
+        print(f"  {mapping['region_id']}: {text}")
     
     # 显示性能优势
     print(f"\n🎯 性能优势:")
