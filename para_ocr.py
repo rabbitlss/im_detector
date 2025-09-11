@@ -114,14 +114,13 @@ class ParallelRegionOCR:
             self.devices = [f"cuda:{gpu_id}" for gpu_id in gpu_ids]
             self.num_workers = len(gpu_ids)
         elif use_gpu:
-            # 自动检测GPU数量
-            try:
-                import torch
-                gpu_count = torch.cuda.device_count()
+            # 自动检测GPU数量（使用最简单的方法）
+            gpu_count = self._detect_gpu_count()
+            if gpu_count > 0:
                 self.devices = [f"cuda:{i}" for i in range(gpu_count)]
                 self.num_workers = gpu_count
-            except:
-                print("⚠️ 无法检测GPU，使用CPU")
+            else:
+                print("⚠️ 未检测到GPU，使用CPU")
                 self.devices = ["cpu"]
                 self.num_workers = num_workers or mp.cpu_count()
         else:
@@ -131,6 +130,47 @@ class ParallelRegionOCR:
         print(f"🚀 并行OCR处理器初始化:")
         print(f"   - 工作器数量: {self.num_workers}")
         print(f"   - 设备列表: {self.devices}")
+    
+    def _detect_gpu_count(self) -> int:
+        """
+        简单的GPU检测方法
+        优先级: PyTorch > nvidia-smi > 0
+        """
+        # 方法1: 尝试PyTorch（最常用）
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return torch.cuda.device_count()
+        except ImportError:
+            pass
+        
+        # 方法2: 尝试nvidia-smi命令
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['nvidia-smi', '-L'],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5
+            )
+            # 计算输出行数（每行一个GPU）
+            lines = result.stdout.strip().split('\n')
+            return len([l for l in lines if l.strip()])
+        except:
+            pass
+        
+        # 方法3: 检查CUDA环境变量
+        import os
+        cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+        if cuda_visible and cuda_visible != '-1':
+            # CUDA_VISIBLE_DEVICES="0,1,2" 表示3个GPU
+            gpu_ids = [g.strip() for g in cuda_visible.split(',') if g.strip()]
+            if gpu_ids:
+                return len(gpu_ids)
+        
+        # 默认返回0（没有GPU）
+        return 0
     
     def recognize_regions_parallel_thread(self, 
                                          image: np.ndarray,
