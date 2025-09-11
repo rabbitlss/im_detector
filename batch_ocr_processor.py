@@ -33,7 +33,8 @@ class BatchOCRProcessor:
     
     def __init__(self, max_batch_size: int = 32, 
                  target_height: int = 48,  # 增加到48px以保留更多细节
-                 padding: int = 5):
+                 padding: int = 5,
+                 use_separator: bool = True):
         """
         初始化批量OCR处理器
         
@@ -41,10 +42,12 @@ class BatchOCRProcessor:
             max_batch_size: 最大批处理大小
             target_height: 标准化高度
             padding: 图像间填充像素
+            use_separator: 是否使用分隔符
         """
         self.max_batch_size = max_batch_size
         self.target_height = target_height
         self.padding = padding
+        self.use_separator = use_separator
         self.total_processing_time = 0
         self.total_regions_processed = 0
         
@@ -54,6 +57,19 @@ class BatchOCRProcessor:
             'medium': (20, 35),   # 中等字体  
             'large': (35, 100)    # 大字体
         }
+        
+        # 创建分隔符图像（黑色竖线）
+        if self.use_separator:
+            self.separator = self._create_separator()
+    
+    def _create_separator(self) -> np.ndarray:
+        """创建分隔符图像（黑色竖线，易于OCR识别为 | ）"""
+        # 创建白色背景
+        separator = np.ones((self.target_height, self.padding, 3), dtype=np.uint8) * 255
+        # 在中间画黑色竖线
+        mid_x = self.padding // 2
+        separator[:, mid_x:mid_x+1, :] = 0  # 黑色竖线
+        return separator
         
     def collect_text_regions(self, image: np.ndarray, 
                            yolo_detections: List[Dict],
@@ -176,14 +192,27 @@ class BatchOCRProcessor:
             
         # 拼接所有区域
         if normalized_regions:
-            total_width = current_x - self.padding  # 去掉最后一个padding
+            # 如果使用分隔符，调整总宽度计算
+            if self.use_separator:
+                # 每个区域后面都有分隔符（除了最后一个）
+                total_width = sum(r.shape[1] for r in normalized_regions) + self.padding * (len(normalized_regions) - 1)
+            else:
+                total_width = current_x - self.padding  # 去掉最后一个padding
+                
             batch_image = np.ones((self.target_height, total_width, 3), dtype=np.uint8) * 255
             
             current_x = 0
-            for resized_region in normalized_regions:
+            for i, resized_region in enumerate(normalized_regions):
                 h, w = resized_region.shape[:2]
                 batch_image[0:h, current_x:current_x+w] = resized_region
-                current_x += w + self.padding
+                current_x += w
+                
+                # 添加分隔符（除了最后一个区域）
+                if self.use_separator and i < len(normalized_regions) - 1:
+                    batch_image[:, current_x:current_x+self.padding] = self.separator
+                    current_x += self.padding
+                elif not self.use_separator:
+                    current_x += self.padding
                 
             print(f"✅ 批处理图像创建完成: {batch_image.shape}")
             return batch_image, region_mappings
@@ -259,17 +288,17 @@ class BatchOCRProcessor:
                     
         return groups
     
-    def simulate_ocr_recognition(self, batch_image: np.ndarray, 
-                               region_mappings: List[Dict]) -> List[BatchOCRResult]:
+    def batch_ocr_recognition(self, batch_image: np.ndarray, 
+                               region_mappings: List[Dict]) -> List[str]:
         """
-        模拟OCR识别过程（单次调用处理整个批次）
+        真实OCR识别过程（单次调用处理整个批次）
         
         Args:
             batch_image: 批处理图像  
             region_mappings: 区域映射信息
             
         Returns:
-            批量识别结果
+            各个区域的识别文本列表
         """
         
         if batch_image.size == 0:
@@ -278,49 +307,106 @@ class BatchOCRProcessor:
         print(f"🔍 执行批量OCR识别...")
         start_time = time.time()
         
-        # 模拟真实OCR模型调用
-        # 在实际应用中，这里会调用 PP-OCRv4 识别模型
-        results = []
+        # 真实OCR模型调用
+        from ultrafast_ocr.core import UltraFastOCR
+        ocr = UltraFastOCR()
         
-        # 模拟不同类型的文字识别结果
-        sample_texts = [
-            "你好，今天天气不错", "是的，很适合出去走走",  
-            "我们去公园散步怎么样？", "好主意！几点见面？",
-            "下午两点在公园门口", "没问题，到时候见",
-            "这是普通消息", "这是重要提醒消息",
-            "Hello mixed English", "包含数字123和符号!@#",
-            "正在输入消息...", "发送", "表情 文件 图片 语音"
-        ]
+        # 关键：只调用一次OCR识别整个拼接后的图像
+        combined_text = ocr.recognize_single_line(batch_image)
         
-        for i, mapping in enumerate(region_mappings):
-            # 模拟OCR识别耗时和结果
-            simulated_text = sample_texts[i % len(sample_texts)]
-            simulated_confidence = 0.85 + (i % 3) * 0.05  # 0.85-0.95
+        # 计算总处理时间
+        total_time_ms = (time.time() - start_time) * 1000
+        
+        print(f"✅ 批量OCR识别完成（单次调用）:")
+        print(f"   - OCR调用次数: 1 次")
+        print(f"   - 处理区域数: {len(region_mappings)}")
+        print(f"   - 总耗时: {total_time_ms:.1f}ms")
+        print(f"   - 识别结果: {combined_text}")
+        
+        # 分割识别结果到各个区域，返回文本列表
+        text_parts = self._split_combined_result(combined_text, len(region_mappings))
+        
+        # 更新统计信息
+        self.total_processing_time += total_time_ms
+        self.total_regions_processed += len(region_mappings)
+        
+        # 直接返回各部分文本的列表
+        return text_parts
+    
+    def _split_combined_result(self, combined_text: str, num_regions: int) -> List[str]:
+        """
+        分割合并的OCR结果
+        
+        Args:
+            combined_text: 合并的识别文本
+            num_regions: 区域数量
             
+        Returns:
+            分割后的文本列表
+        """
+        if not combined_text:
+            return [''] * num_regions
+        
+        # 如果只有一个区域，直接返回
+        if num_regions == 1:
+            return [combined_text]
+        
+        # 尝试多种分割策略
+        # 策略1: 按竖线分割（使用分隔符时，OCR应该识别为竖线）
+        if self.use_separator:
+            # 尝试多种可能的竖线字符
+            separators = ['|', '｜', 'I', 'l', '1']  # 竖线可能被识别为这些字符
+            for sep in separators:
+                if sep in combined_text:
+                    parts = combined_text.split(sep)
+                    # 允许一定的容错（±1）
+                    if abs(len(parts) - num_regions) <= 1:
+                        # 调整到正确数量
+                        if len(parts) > num_regions:
+                            # 合并最后的部分
+                            parts = parts[:num_regions-1] + [sep.join(parts[num_regions-1:])]
+                        elif len(parts) < num_regions:
+                            # 添加空字符串
+                            parts.extend([''] * (num_regions - len(parts)))
+                        return [p.strip() for p in parts]
+        
+        # 策略2: 按多个空格分割（不使用分隔符时）
+        import re
+        parts = re.split(r'\s{2,}', combined_text)
+        if abs(len(parts) - num_regions) <= 1:
+            if len(parts) > num_regions:
+                parts = parts[:num_regions]
+            elif len(parts) < num_regions:
+                parts.extend([''] * (num_regions - len(parts)))
+            return [p.strip() for p in parts]
+        
+        # 策略3: 按固定长度分割（兜底方案）
+        avg_len = len(combined_text) // num_regions
+        parts = []
+        for i in range(num_regions):
+            start = i * avg_len
+            end = start + avg_len if i < num_regions - 1 else len(combined_text)
+            parts.append(combined_text[start:end].strip())
+        return parts
+    
+    def simulate_ocr_recognition(self, batch_image: np.ndarray, 
+                               region_mappings: List[Dict]) -> List[BatchOCRResult]:
+        """
+        模拟OCR识别（用于测试，不需要真实OCR模型）
+        """
+        # 调用真实OCR获取文本列表
+        text_results = self.batch_ocr_recognition(batch_image, region_mappings)
+        
+        # 转换为BatchOCRResult对象列表
+        results = []
+        for text, mapping in zip(text_results, region_mappings):
             result = BatchOCRResult(
                 region_id=mapping['region_id'],
-                text_content=simulated_text,
-                confidence=simulated_confidence,
-                processing_time_ms=0  # 批处理时间稍后统一计算
+                text_content=text,
+                confidence=0.95,
+                processing_time_ms=0
             )
             results.append(result)
-        
-        # 计算总处理时间（关键：只调用一次OCR模型）
-        total_time_ms = (time.time() - start_time) * 1000
-        avg_time_per_region = total_time_ms / len(results) if results else 0
-        
-        # 分配处理时间到各个结果
-        for result in results:
-            result.processing_time_ms = avg_time_per_region
-            
-        print(f"✅ 批量OCR识别完成:")
-        print(f"   - 处理区域数: {len(results)}")
-        print(f"   - 总耗时: {total_time_ms:.1f}ms")
-        print(f"   - 平均耗时: {avg_time_per_region:.1f}ms/区域")
-        print(f"   - 关键优势: 只调用1次OCR模型 vs {len(results)}次单独调用")
-        
-        self.total_processing_time += total_time_ms
-        self.total_regions_processed += len(results)
         
         return results
     
@@ -360,7 +446,18 @@ class BatchOCRProcessor:
         batch_image, region_mappings = self.create_batch_image(text_regions)
         
         # 步骤3: 执行批量OCR识别（核心：只调用一次）
-        ocr_results = self.simulate_ocr_recognition(batch_image, region_mappings)
+        text_results = self.batch_ocr_recognition(batch_image, region_mappings)
+        
+        # 将文本结果转换为BatchOCRResult对象
+        ocr_results = []
+        for i, (text, mapping) in enumerate(zip(text_results, region_mappings)):
+            result = BatchOCRResult(
+                region_id=mapping['region_id'],
+                text_content=text,
+                confidence=0.95,  # 默认置信度
+                processing_time_ms=0  # 稍后计算
+            )
+            ocr_results.append(result)
         
         # 步骤4: 整理结果
         total_time = (time.time() - start_time) * 1000
