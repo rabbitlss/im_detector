@@ -116,17 +116,22 @@ def test_direct_text_regions():
         text_regions.append(region)
     
     # 创建批处理图像
-    batch_image, region_mappings = batch_processor.create_batch_image(text_regions)
+    batch_image, region_mappings, concat_stats = batch_processor.create_batch_image(text_regions)
     
     print(f"批处理图像尺寸: {batch_image.shape}")
     print(f"包含区域数: {len(region_mappings)}")
     
-    # 执行OCR识别（返回文本列表）
-    text_results = batch_processor.batch_ocr_recognition(batch_image, region_mappings)
+    # 执行OCR识别（返回文本列表和时间统计）
+    text_results, time_stats = batch_processor.batch_ocr_recognition(batch_image, region_mappings)
     
     print("\n识别结果:")
-    for i, (text, mapping) in enumerate(zip(text_results, region_mappings)):
+    for text, mapping in zip(text_results, region_mappings):
         print(f"  {mapping['region_id']}: {text}")
+    
+    print("\n⏱️ 时间统计:")
+    print(f"  - OCR识别: {time_stats.get('ocr_time_ms', 0):.1f}ms")
+    print(f"  - 结果分割: {time_stats.get('split_time_ms', 0):.1f}ms")
+    print(f"  - 总计: {time_stats.get('total_time_ms', 0):.1f}ms")
     
     # 显示性能优势
     print(f"\n🎯 性能优势:")
