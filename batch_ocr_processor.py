@@ -130,7 +130,7 @@ class BatchOCRProcessor:
         print(f"✅ 收集到 {len(text_regions)} 个文字区域")
         return text_regions
     
-    def create_batch_image(self, text_regions: List[TextRegion]) -> Tuple[np.ndarray, List[Dict]]:
+    def create_batch_image(self, text_regions: List[TextRegion]) -> Tuple[np.ndarray, List[Dict], Dict[str, float]]:
         """
         将多个文字区域拼接成批处理图像
         
@@ -138,13 +138,14 @@ class BatchOCRProcessor:
             text_regions: 文字区域列表
             
         Returns:
-            批处理图像和区域映射信息
+            (批处理图像, 区域映射信息, 时间统计)
         """
         
         if not text_regions:
-            return np.array([]), []
+            return np.array([]), [], {}
             
         print(f"🔧 创建批处理图像，包含 {len(text_regions)} 个区域...")
+        start_time = time.time()
         
         # 根据原始高度分组，避免过度缩放
         height_groups = self._group_by_similar_height(text_regions)
@@ -214,10 +215,15 @@ class BatchOCRProcessor:
                 elif not self.use_separator:
                     current_x += self.padding
                 
+            # 计算拼接耗时
+            concat_time_ms = (time.time() - start_time) * 1000
+            time_stats = {'concat_time_ms': concat_time_ms}
+            
             print(f"✅ 批处理图像创建完成: {batch_image.shape}")
-            return batch_image, region_mappings
+            print(f"   - 拼接耗时: {concat_time_ms:.1f}ms")
+            return batch_image, region_mappings, time_stats
         else:
-            return np.array([]), []
+            return np.array([]), [], {}
     
     def _calculate_optimal_scale(self, original_height: int) -> float:
         """
@@ -289,7 +295,7 @@ class BatchOCRProcessor:
         return groups
     
     def batch_ocr_recognition(self, batch_image: np.ndarray, 
-                               region_mappings: List[Dict]) -> List[str]:
+                               region_mappings: List[Dict]) -> Tuple[List[str], Dict[str, float]]:
         """
         真实OCR识别过程（单次调用处理整个批次）
         
@@ -298,40 +304,53 @@ class BatchOCRProcessor:
             region_mappings: 区域映射信息
             
         Returns:
-            各个区域的识别文本列表
+            (各个区域的识别文本列表, 时间统计字典)
         """
         
         if batch_image.size == 0:
-            return []
+            return [], {}
             
         print(f"🔍 执行批量OCR识别...")
-        start_time = time.time()
+        total_start = time.time()
         
         # 真实OCR模型调用
         from ultrafast_ocr.core import UltraFastOCR
         ocr = UltraFastOCR()
         
         # 关键：只调用一次OCR识别整个拼接后的图像
+        ocr_start = time.time()
         combined_text = ocr.recognize_single_line(batch_image)
+        ocr_time_ms = (time.time() - ocr_start) * 1000
+        
+        # 分割识别结果到各个区域
+        split_start = time.time()
+        text_parts = self._split_combined_result(combined_text, len(region_mappings))
+        split_time_ms = (time.time() - split_start) * 1000
         
         # 计算总处理时间
-        total_time_ms = (time.time() - start_time) * 1000
+        total_time_ms = (time.time() - total_start) * 1000
+        
+        # 时间统计
+        time_stats = {
+            'ocr_time_ms': ocr_time_ms,
+            'split_time_ms': split_time_ms,
+            'total_time_ms': total_time_ms
+        }
         
         print(f"✅ 批量OCR识别完成（单次调用）:")
         print(f"   - OCR调用次数: 1 次")
         print(f"   - 处理区域数: {len(region_mappings)}")
+        print(f"   - OCR识别耗时: {ocr_time_ms:.1f}ms")
+        print(f"   - 结果分割耗时: {split_time_ms:.1f}ms")
         print(f"   - 总耗时: {total_time_ms:.1f}ms")
-        print(f"   - 识别结果: {combined_text}")
-        
-        # 分割识别结果到各个区域，返回文本列表
-        text_parts = self._split_combined_result(combined_text, len(region_mappings))
+        print(f"   - 识别结果: {combined_text[:100]}..." if len(combined_text) > 100 else f"   - 识别结果: {combined_text}")
         
         # 更新统计信息
         self.total_processing_time += total_time_ms
         self.total_regions_processed += len(region_mappings)
         
-        # 直接返回各部分文本的列表
-        return text_parts
+        # 返回文本列表和时间统计
+        return text_parts, time_stats
     
     def _split_combined_result(self, combined_text: str, num_regions: int) -> List[str]:
         """
@@ -395,7 +414,7 @@ class BatchOCRProcessor:
         模拟OCR识别（用于测试，不需要真实OCR模型）
         """
         # 调用真实OCR获取文本列表
-        text_results = self.batch_ocr_recognition(batch_image, region_mappings)
+        text_results, _ = self.batch_ocr_recognition(batch_image, region_mappings)
         
         # 转换为BatchOCRResult对象列表
         results = []
@@ -443,14 +462,14 @@ class BatchOCRProcessor:
             }
         
         # 步骤2: 创建批处理图像
-        batch_image, region_mappings = self.create_batch_image(text_regions)
+        batch_image, region_mappings, concat_stats = self.create_batch_image(text_regions)
         
         # 步骤3: 执行批量OCR识别（核心：只调用一次）
-        text_results = self.batch_ocr_recognition(batch_image, region_mappings)
+        text_results, ocr_stats = self.batch_ocr_recognition(batch_image, region_mappings)
         
         # 将文本结果转换为BatchOCRResult对象
         ocr_results = []
-        for i, (text, mapping) in enumerate(zip(text_results, region_mappings)):
+        for text, mapping in zip(text_results, region_mappings):
             result = BatchOCRResult(
                 region_id=mapping['region_id'],
                 text_content=text,
@@ -482,20 +501,30 @@ class BatchOCRProcessor:
                            if m['region_id'] == result.region_id)
             })
         
-        # 性能统计
+        # 性能统计（包含详细时间分解）
         stats = {
             'total_regions': len(text_regions),
             'total_time_ms': total_time,
             'ocr_calls': 1,  # 关键指标：只调用1次OCR
             'avg_time_per_region': total_time / len(text_regions),
             'regions_per_second': len(text_regions) / (total_time / 1000),
-            'batch_image_size': batch_image.shape if batch_image.size > 0 else None
+            'batch_image_size': batch_image.shape if batch_image.size > 0 else None,
+            # 详细时间统计
+            'concat_time_ms': concat_stats.get('concat_time_ms', 0),
+            'ocr_time_ms': ocr_stats.get('ocr_time_ms', 0),
+            'split_time_ms': ocr_stats.get('split_time_ms', 0),
+            'other_time_ms': total_time - concat_stats.get('concat_time_ms', 0) - ocr_stats.get('total_time_ms', 0)
         }
         
         print(f"\n🎯 批量处理完成:")
         print(f"   ✅ OCR调用次数: {stats['ocr_calls']} 次（关键优势！）")
         print(f"   ✅ 处理区域数: {stats['total_regions']}")
-        print(f"   ✅ 总耗时: {stats['total_time_ms']:.1f}ms")  
+        print(f"   ✅ 总耗时: {stats['total_time_ms']:.1f}ms")
+        print(f"   📊 时间分解:")
+        print(f"      - 图像拼接: {stats['concat_time_ms']:.1f}ms ({stats['concat_time_ms']/stats['total_time_ms']*100:.1f}%)")
+        print(f"      - OCR识别: {stats['ocr_time_ms']:.1f}ms ({stats['ocr_time_ms']/stats['total_time_ms']*100:.1f}%)")
+        print(f"      - 结果分割: {stats['split_time_ms']:.1f}ms ({stats['split_time_ms']/stats['total_time_ms']*100:.1f}%)")
+        print(f"      - 其他处理: {stats['other_time_ms']:.1f}ms ({stats['other_time_ms']/stats['total_time_ms']*100:.1f}%)")
         print(f"   ✅ 处理速度: {stats['regions_per_second']:.1f} 区域/秒")
         
         return {
