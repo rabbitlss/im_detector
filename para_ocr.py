@@ -296,13 +296,13 @@ class ParallelRegionOCR:
                                    labels: List[str] = None,
                                    batch_size: int = 8) -> List[str]:
         """
-        GPU批处理识别（将多个区域打包到GPU）
+        真正的并行GPU批处理识别
         
         Args:
             image: 输入图像
             regions: 区域坐标列表
             labels: 可选的区域标签
-            batch_size: 每批处理的区域数
+            batch_size: 每个GPU的批处理大小
             
         Returns:
             识别文本列表
@@ -311,12 +311,11 @@ class ParallelRegionOCR:
             print("⚠️ GPU批处理需要GPU支持，切换到线程池模式")
             return self.recognize_regions_parallel_thread(image, regions, labels)
         
-        print(f"🔍 使用GPU批处理识别 {len(regions)} 个区域...")
-        print(f"   - 批大小: {batch_size}")
-        print(f"   - 批次数: {(len(regions) + batch_size - 1) // batch_size}")
+        print(f"🔍 使用并行GPU批处理识别 {len(regions)} 个区域...")
+        print(f"   - GPU数量: {len(self.devices)}")
+        print(f"   - 每GPU批大小: {batch_size}")
         
         start_time = time.time()
-        results = []
         
         # 创建GPU工作器
         gpu_workers = []
@@ -331,32 +330,56 @@ class ParallelRegionOCR:
             print("❌ 没有可用的GPU工作器")
             return []
         
-        # 批处理
-        for batch_start in range(0, len(regions), batch_size):
-            batch_end = min(batch_start + batch_size, len(regions))
-            batch_regions = regions[batch_start:batch_end]
+        # 准备Region对象
+        region_objs = []
+        for i, (x1, y1, x2, y2) in enumerate(regions):
+            label = labels[i] if labels and i < len(labels) else f"region_{i}"
+            region_objs.append(Region(x1, y1, x2, y2, label, i))
+        
+        # 将区域分配给不同的GPU（负载均衡）
+        gpu_tasks = [[] for _ in gpu_workers]
+        for i, region in enumerate(region_objs):
+            gpu_idx = i % len(gpu_workers)
+            gpu_tasks[gpu_idx].append(region)
+        
+        # 使用线程池并行处理（每个GPU一个线程）
+        results_dict = {}
+        
+        with ThreadPoolExecutor(max_workers=len(gpu_workers)) as executor:
+            # 定义GPU处理函数
+            def process_gpu_batch(worker_idx, worker, task_regions):
+                """单个GPU处理其分配的所有区域"""
+                local_results = []
+                for region in task_regions:
+                    result = worker.process_region(image, region)
+                    local_results.append((region.index, result))
+                    print(f"   [GPU:{worker.worker_id}] {region.label}: {result.text[:30]}..."
+                          if len(result.text) > 30 else
+                          f"   [GPU:{worker.worker_id}] {region.label}: {result.text}")
+                return local_results
             
-            # 选择工作器（轮询）
-            worker = gpu_workers[(batch_start // batch_size) % len(gpu_workers)]
+            # 提交任务到线程池（每个GPU一个任务）
+            futures = []
+            for idx, (worker, tasks) in enumerate(zip(gpu_workers, gpu_tasks)):
+                if tasks:  # 只处理有任务的GPU
+                    future = executor.submit(process_gpu_batch, idx, worker, tasks)
+                    futures.append(future)
             
-            # 处理批次
-            for i, (x1, y1, x2, y2) in enumerate(batch_regions):
-                idx = batch_start + i
-                label = labels[idx] if labels and idx < len(labels) else f"region_{idx}"
-                region = Region(x1, y1, x2, y2, label, idx)
-                
-                result = worker.process_region(image, region)
-                results.append(result.text)
-                
-                print(f"   [GPU:{worker.worker_id}] {label}: {result.text[:30]}..."
-                      if len(result.text) > 30 else
-                      f"   [GPU:{worker.worker_id}] {label}: {result.text}")
+            # 收集结果
+            for future in as_completed(futures):
+                gpu_results = future.result()
+                for region_idx, result in gpu_results:
+                    results_dict[region_idx] = result.text
+        
+        # 按原始顺序排列结果
+        results = [results_dict.get(i, "") for i in range(len(regions))]
         
         total_time = (time.time() - start_time) * 1000
-        print(f"\n✅ GPU批处理完成:")
+        print(f"\n✅ 并行GPU批处理完成:")
         print(f"   - 总耗时: {total_time:.1f}ms")
         print(f"   - 平均每区域: {total_time/len(regions):.1f}ms")
         print(f"   - 吞吐量: {len(regions)/(total_time/1000):.1f} 区域/秒")
+        print(f"   - 并行效率: {len(regions)/(total_time/1000)/len(gpu_workers):.1f} 区域/秒/GPU")
         
         return results
 
