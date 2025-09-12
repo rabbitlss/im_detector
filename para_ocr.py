@@ -344,42 +344,101 @@ class ParallelRegionOCR:
         
         # 使用线程池并行处理（每个GPU一个线程）
         results_dict = {}
+        gpu_time_stats = {}  # 记录每个GPU的时间统计
         
         with ThreadPoolExecutor(max_workers=len(gpu_workers)) as executor:
             # 定义GPU处理函数
-            def process_gpu_batch(worker_idx, worker, task_regions):
+            def process_gpu_batch(worker, task_regions):
                 """单个GPU处理其分配的所有区域"""
+                gpu_start_time = time.time()
                 local_results = []
+                region_times = []  # 记录每个区域的处理时间
+                
                 for region in task_regions:
+                    region_start = time.time()
                     result = worker.process_region(image, region)
+                    region_time = (time.time() - region_start) * 1000  # ms
+                    
                     local_results.append((region.index, result))
-                    print(f"   [GPU:{worker.worker_id}] {region.label}: {result.text[:30]}..."
+                    region_times.append(region_time)
+                    
+                    print(f"   [GPU:{worker.worker_id}] {region.label}: {result.text[:30]}... ({region_time:.1f}ms)"
                           if len(result.text) > 30 else
-                          f"   [GPU:{worker.worker_id}] {region.label}: {result.text}")
-                return local_results
+                          f"   [GPU:{worker.worker_id}] {region.label}: {result.text} ({region_time:.1f}ms)")
+                
+                gpu_total_time = (time.time() - gpu_start_time) * 1000  # ms
+                
+                # 返回结果和时间统计
+                return {
+                    'results': local_results,
+                    'gpu_id': worker.worker_id,
+                    'total_time': gpu_total_time,
+                    'region_times': region_times,
+                    'num_regions': len(task_regions)
+                }
             
             # 提交任务到线程池（每个GPU一个任务）
-            futures = []
-            for idx, (worker, tasks) in enumerate(zip(gpu_workers, gpu_tasks)):
+            future_to_gpu = {}
+            for worker, tasks in zip(gpu_workers, gpu_tasks):
                 if tasks:  # 只处理有任务的GPU
-                    future = executor.submit(process_gpu_batch, idx, worker, tasks)
-                    futures.append(future)
+                    future = executor.submit(process_gpu_batch, worker, tasks)
+                    future_to_gpu[future] = worker.worker_id
             
             # 收集结果
-            for future in as_completed(futures):
-                gpu_results = future.result()
-                for region_idx, result in gpu_results:
+            for future in as_completed(future_to_gpu):
+                gpu_result = future.result()
+                gpu_id = gpu_result['gpu_id']
+                
+                # 保存时间统计
+                gpu_time_stats[f'GPU_{gpu_id}'] = {
+                    'total_time_ms': gpu_result['total_time'],
+                    'num_regions': gpu_result['num_regions'],
+                    'avg_time_ms': gpu_result['total_time'] / gpu_result['num_regions'] if gpu_result['num_regions'] > 0 else 0,
+                    'min_time_ms': min(gpu_result['region_times']) if gpu_result['region_times'] else 0,
+                    'max_time_ms': max(gpu_result['region_times']) if gpu_result['region_times'] else 0,
+                    'region_times': gpu_result['region_times']
+                }
+                
+                # 保存识别结果
+                for region_idx, result in gpu_result['results']:
                     results_dict[region_idx] = result.text
         
         # 按原始顺序排列结果
         results = [results_dict.get(i, "") for i in range(len(regions))]
         
         total_time = (time.time() - start_time) * 1000
+        
+        # 打印总体统计
         print(f"\n✅ 并行GPU批处理完成:")
         print(f"   - 总耗时: {total_time:.1f}ms")
         print(f"   - 平均每区域: {total_time/len(regions):.1f}ms")
         print(f"   - 吞吐量: {len(regions)/(total_time/1000):.1f} 区域/秒")
         print(f"   - 并行效率: {len(regions)/(total_time/1000)/len(gpu_workers):.1f} 区域/秒/GPU")
+        
+        # 打印每个GPU的详细统计
+        print(f"\n📊 各GPU时间统计:")
+        for gpu_name, stats in gpu_time_stats.items():
+            print(f"   {gpu_name}:")
+            print(f"      - 处理区域数: {stats['num_regions']}")
+            print(f"      - 总耗时: {stats['total_time_ms']:.1f}ms")
+            print(f"      - 平均耗时: {stats['avg_time_ms']:.1f}ms/区域")
+            print(f"      - 最快: {stats['min_time_ms']:.1f}ms")
+            print(f"      - 最慢: {stats['max_time_ms']:.1f}ms")
+        
+        # 计算并行加速比
+        if gpu_time_stats:
+            # 串行时间 = 所有GPU处理时间之和
+            serial_time = sum(stats['total_time_ms'] for stats in gpu_time_stats.values())
+            # 并行时间 = 最慢的GPU完成时间
+            parallel_time = max(stats['total_time_ms'] for stats in gpu_time_stats.values())
+            speedup = serial_time / parallel_time if parallel_time > 0 else 1
+            
+            print(f"\n🚀 并行性能分析:")
+            print(f"   - 串行总时间: {serial_time:.1f}ms")
+            print(f"   - 并行完成时间: {parallel_time:.1f}ms")
+            print(f"   - 实际加速比: {speedup:.2f}x")
+            print(f"   - 理论加速比: {len(gpu_workers):.0f}x")
+            print(f"   - 并行效率: {speedup/len(gpu_workers)*100:.1f}%")
         
         return results
 
