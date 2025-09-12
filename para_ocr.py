@@ -45,22 +45,26 @@ class OCRWorker:
         """
         self.worker_id = worker_id
         self.device = device
-        
-        # 延迟导入，避免在主进程中初始化
-        from ultrafast_ocr.core import UltraFastOCR
-        
-        # 根据设备初始化OCR
-        if 'cuda' in device:
+        self.ocr = None  # 延迟初始化
+    
+    def _init_ocr_if_needed(self):
+        """延迟初始化OCR（在子进程中执行）"""
+        if self.ocr is None:
             import os
-            # 设置CUDA设备
-            gpu_id = int(device.split(':')[1]) if ':' in device else 0
-            os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+            # 在子进程中设置CUDA设备
+            if 'cuda' in self.device:
+                gpu_id = int(self.device.split(':')[1]) if ':' in self.device else 0
+                os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+                print(f"🔧 进程 {os.getpid()}: Worker {self.worker_id} 设置 CUDA_VISIBLE_DEVICES={gpu_id}")
             
-        self.ocr = UltraFastOCR()
-        print(f"✅ Worker {worker_id} 初始化完成 (设备: {device})")
+            from ultrafast_ocr.core import UltraFastOCR
+            self.ocr = UltraFastOCR()
+            print(f"✅ 进程 {os.getpid()}: Worker {self.worker_id} 初始化完成 (设备: {self.device})")
     
     def process_region(self, image: np.ndarray, region: Region) -> RegionOCRResult:
         """处理单个区域"""
+        self._init_ocr_if_needed()  # 确保OCR已初始化
+        
         x1, y1, x2, y2 = region.x1, region.y1, region.x2, region.y2
         roi = image[y1:y2, x1:x2]
         
@@ -82,6 +86,51 @@ class OCRWorker:
             time_ms=time_ms,
             worker_id=f"worker_{self.worker_id}"
         )
+
+# 全局函数，用于进程池
+def process_gpu_task(args):
+    """
+    在独立进程中处理GPU任务
+    每个进程有独立的CUDA_VISIBLE_DEVICES设置
+    """
+    worker_id, device, image, task_regions = args
+    import os
+    
+    # 在进程开始时设置GPU
+    if 'cuda' in device:
+        gpu_id = int(device.split(':')[1]) if ':' in device else 0
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        print(f"🚀 进程 {os.getpid()}: 使用GPU {gpu_id}")
+    
+    # 创建工作器并处理所有区域
+    worker = OCRWorker(worker_id, device)
+    local_results = []
+    region_times = []
+    
+    gpu_start_time = time.time()
+    
+    for region in task_regions:
+        region_start = time.time()
+        result = worker.process_region(image, region)
+        region_time = (time.time() - region_start) * 1000
+        
+        local_results.append((region.index, result))
+        region_times.append(region_time)
+        
+        print(f"   [进程{os.getpid()}|GPU:{worker.worker_id}] {region.label}: {result.text[:30]}... ({region_time:.1f}ms)"
+              if len(result.text) > 30 else
+              f"   [进程{os.getpid()}|GPU:{worker.worker_id}] {region.label}: {result.text} ({region_time:.1f}ms)")
+    
+    gpu_total_time = (time.time() - gpu_start_time) * 1000
+    
+    return {
+        'results': local_results,
+        'gpu_id': worker_id,
+        'total_time': gpu_total_time,
+        'region_times': region_times,
+        'num_regions': len(task_regions),
+        'process_id': os.getpid()
+    }
 
 def process_region_batch(args):
     """处理一批区域（用于进程池）"""
@@ -296,13 +345,13 @@ class ParallelRegionOCR:
                                    labels: List[str] = None,
                                    batch_size: int = 8) -> List[str]:
         """
-        真正的并行GPU批处理识别
+        真正的并行GPU批处理识别（使用进程池）
         
         Args:
             image: 输入图像
             regions: 区域坐标列表
             labels: 可选的区域标签
-            batch_size: 每个GPU的批处理大小
+            batch_size: 每个GPU的批处理大小（保留参数兼容性）
             
         Returns:
             识别文本列表
@@ -311,24 +360,11 @@ class ParallelRegionOCR:
             print("⚠️ GPU批处理需要GPU支持，切换到线程池模式")
             return self.recognize_regions_parallel_thread(image, regions, labels)
         
-        print(f"🔍 使用并行GPU批处理识别 {len(regions)} 个区域...")
+        print(f"🔍 使用真正的并行GPU处理识别 {len(regions)} 个区域...")
         print(f"   - GPU数量: {len(self.devices)}")
-        print(f"   - 每GPU批大小: {batch_size}")
+        print(f"   - 使用进程池确保GPU隔离")
         
         start_time = time.time()
-        
-        # 创建GPU工作器
-        gpu_workers = []
-        for i, device in enumerate(self.devices):
-            try:
-                worker = OCRWorker(i, device)
-                gpu_workers.append(worker)
-            except Exception as e:
-                print(f"⚠️ 无法初始化GPU {device}: {e}")
-        
-        if not gpu_workers:
-            print("❌ 没有可用的GPU工作器")
-            return []
         
         # 准备Region对象
         region_objs = []
@@ -337,71 +373,59 @@ class ParallelRegionOCR:
             region_objs.append(Region(x1, y1, x2, y2, label, i))
         
         # 将区域分配给不同的GPU（负载均衡）
-        gpu_tasks = [[] for _ in gpu_workers]
+        gpu_tasks = [[] for _ in self.devices]
         for i, region in enumerate(region_objs):
-            gpu_idx = i % len(gpu_workers)
+            gpu_idx = i % len(self.devices)
             gpu_tasks[gpu_idx].append(region)
         
-        # 使用线程池并行处理（每个GPU一个线程）
-        results_dict = {}
-        gpu_time_stats = {}  # 记录每个GPU的时间统计
+        # 准备进程池参数
+        process_args = []
+        for i, (device, task_regions) in enumerate(zip(self.devices, gpu_tasks)):
+            if task_regions:  # 只处理有任务的GPU
+                process_args.append((i, device, image, task_regions))
         
-        with ThreadPoolExecutor(max_workers=len(gpu_workers)) as executor:
-            # 定义GPU处理函数
-            def process_gpu_batch(worker, task_regions):
-                """单个GPU处理其分配的所有区域"""
-                gpu_start_time = time.time()
-                local_results = []
-                region_times = []  # 记录每个区域的处理时间
-                
-                for region in task_regions:
-                    region_start = time.time()
-                    result = worker.process_region(image, region)
-                    region_time = (time.time() - region_start) * 1000  # ms
-                    
-                    local_results.append((region.index, result))
-                    region_times.append(region_time)
-                    
-                    print(f"   [GPU:{worker.worker_id}] {region.label}: {result.text[:30]}... ({region_time:.1f}ms)"
-                          if len(result.text) > 30 else
-                          f"   [GPU:{worker.worker_id}] {region.label}: {result.text} ({region_time:.1f}ms)")
-                
-                gpu_total_time = (time.time() - gpu_start_time) * 1000  # ms
-                
-                # 返回结果和时间统计
-                return {
-                    'results': local_results,
-                    'gpu_id': worker.worker_id,
-                    'total_time': gpu_total_time,
-                    'region_times': region_times,
-                    'num_regions': len(task_regions)
-                }
-            
-            # 提交任务到线程池（每个GPU一个任务）
-            future_to_gpu = {}
-            for worker, tasks in zip(gpu_workers, gpu_tasks):
-                if tasks:  # 只处理有任务的GPU
-                    future = executor.submit(process_gpu_batch, worker, tasks)
-                    future_to_gpu[future] = worker.worker_id
+        # 使用进程池并行处理（每个GPU一个进程）
+        results_dict = {}
+        gpu_time_stats = {}
+        
+        print(f"🚀 启动 {len(process_args)} 个GPU进程...")
+        
+        with ProcessPoolExecutor(max_workers=len(process_args)) as executor:
+            # 提交任务到进程池
+            future_to_args = {
+                executor.submit(process_gpu_task, args): args 
+                for args in process_args
+            }
             
             # 收集结果
-            for future in as_completed(future_to_gpu):
-                gpu_result = future.result()
-                gpu_id = gpu_result['gpu_id']
+            for future in as_completed(future_to_args):
+                args = future_to_args[future]
+                worker_id, device, _, _ = args
                 
-                # 保存时间统计
-                gpu_time_stats[f'GPU_{gpu_id}'] = {
-                    'total_time_ms': gpu_result['total_time'],
-                    'num_regions': gpu_result['num_regions'],
-                    'avg_time_ms': gpu_result['total_time'] / gpu_result['num_regions'] if gpu_result['num_regions'] > 0 else 0,
-                    'min_time_ms': min(gpu_result['region_times']) if gpu_result['region_times'] else 0,
-                    'max_time_ms': max(gpu_result['region_times']) if gpu_result['region_times'] else 0,
-                    'region_times': gpu_result['region_times']
-                }
-                
-                # 保存识别结果
-                for region_idx, result in gpu_result['results']:
-                    results_dict[region_idx] = result.text
+                try:
+                    gpu_result = future.result()
+                    gpu_id = gpu_result['gpu_id']
+                    process_id = gpu_result['process_id']
+                    
+                    print(f"✅ GPU {gpu_id} (进程 {process_id}) 完成")
+                    
+                    # 保存时间统计
+                    gpu_time_stats[f'GPU_{gpu_id}'] = {
+                        'total_time_ms': gpu_result['total_time'],
+                        'num_regions': gpu_result['num_regions'],
+                        'avg_time_ms': gpu_result['total_time'] / gpu_result['num_regions'] if gpu_result['num_regions'] > 0 else 0,
+                        'min_time_ms': min(gpu_result['region_times']) if gpu_result['region_times'] else 0,
+                        'max_time_ms': max(gpu_result['region_times']) if gpu_result['region_times'] else 0,
+                        'region_times': gpu_result['region_times'],
+                        'process_id': process_id
+                    }
+                    
+                    # 保存识别结果
+                    for region_idx, result in gpu_result['results']:
+                        results_dict[region_idx] = result.text
+                        
+                except Exception as e:
+                    print(f"❌ GPU进程失败: {e}")
         
         # 按原始顺序排列结果
         results = [results_dict.get(i, "") for i in range(len(regions))]
@@ -409,16 +433,16 @@ class ParallelRegionOCR:
         total_time = (time.time() - start_time) * 1000
         
         # 打印总体统计
-        print(f"\n✅ 并行GPU批处理完成:")
+        print(f"\n✅ 真正的并行GPU处理完成:")
         print(f"   - 总耗时: {total_time:.1f}ms")
         print(f"   - 平均每区域: {total_time/len(regions):.1f}ms")
         print(f"   - 吞吐量: {len(regions)/(total_time/1000):.1f} 区域/秒")
-        print(f"   - 并行效率: {len(regions)/(total_time/1000)/len(gpu_workers):.1f} 区域/秒/GPU")
+        print(f"   - GPU进程数: {len(process_args)}")
         
         # 打印每个GPU的详细统计
-        print(f"\n📊 各GPU时间统计:")
+        print(f"\n📊 各GPU进程时间统计:")
         for gpu_name, stats in gpu_time_stats.items():
-            print(f"   {gpu_name}:")
+            print(f"   {gpu_name} (进程 {stats['process_id']}):")
             print(f"      - 处理区域数: {stats['num_regions']}")
             print(f"      - 总耗时: {stats['total_time_ms']:.1f}ms")
             print(f"      - 平均耗时: {stats['avg_time_ms']:.1f}ms/区域")
@@ -433,12 +457,13 @@ class ParallelRegionOCR:
             parallel_time = max(stats['total_time_ms'] for stats in gpu_time_stats.values())
             speedup = serial_time / parallel_time if parallel_time > 0 else 1
             
-            print(f"\n🚀 并行性能分析:")
+            print(f"\n🚀 真正的并行性能分析:")
             print(f"   - 串行总时间: {serial_time:.1f}ms")
             print(f"   - 并行完成时间: {parallel_time:.1f}ms")
             print(f"   - 实际加速比: {speedup:.2f}x")
-            print(f"   - 理论加速比: {len(gpu_workers):.0f}x")
-            print(f"   - 并行效率: {speedup/len(gpu_workers)*100:.1f}%")
+            print(f"   - 理论加速比: {len(self.devices):.0f}x")
+            print(f"   - 并行效率: {speedup/len(self.devices)*100:.1f}%")
+            print(f"   - ✅ 每个GPU在独立进程中运行，真正并行！")
         
         return results
 
