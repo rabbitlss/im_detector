@@ -5,13 +5,13 @@
 """
 
 import time
-import threading
 import os
 from typing import List
 import numpy as np
 import cv2
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+import multiprocessing
 
 @dataclass
 class Region:
@@ -31,60 +31,74 @@ class OCRResult:
     time_ms: float
     worker_id: str
 
+# 全局变量用于维护OCR实例
+_ocr_instances = {}
+_process_initialized = {}
+
+def init_worker_process(gpu_id):
+    """
+    初始化工作进程，创建OCR实例
+    这个函数在进程启动时只执行一次
+    """
+    global _ocr_instances, _process_initialized
+    
+    process_id = os.getpid()
+    if process_id in _process_initialized:
+        return  # 已经初始化过
+    
+    # 设置GPU环境
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+    print(f"🚀 进程 {process_id}: 初始化GPU {gpu_id}")
+    
+    # 创建OCR实例（只创建一次）
+    try:
+        from ultrafast_ocr.core import UltraFastOCR
+        print(f"🔧 进程 {process_id}: 初始化OCR模型...")
+        
+        init_start = time.time()
+        ocr = UltraFastOCR()
+        init_time = (time.time() - init_start) * 1000
+        
+        _ocr_instances[process_id] = ocr
+        _process_initialized[process_id] = True
+        
+        print(f"✅ 进程 {process_id}: OCR模型初始化完成 ({init_time:.1f}ms)")
+        print(f"💾 进程 {process_id}: 模型已常驻内存，后续调用无需重新初始化")
+        
+    except Exception as e:
+        print(f"❌ 进程 {process_id}: OCR模型初始化失败: {e}")
+        raise
+
+def get_ocr_instance():
+    """
+    获取当前进程的OCR实例
+    """
+    global _ocr_instances
+    process_id = os.getpid()
+    return _ocr_instances.get(process_id)
+
 def process_gpu_task_persistent(args):
     """
-    在独立进程中处理GPU任务 - 支持持久化和预热
-    每个进程有独立的CUDA_VISIBLE_DEVICES设置
+    在独立进程中处理GPU任务 - 真正的模型持久化
+    模型只在进程首次调用时初始化，后续调用直接复用
     """
-    worker_id, gpu_id, image, task_regions, is_first_image = args
+    worker_id, gpu_id, image, task_regions = args
     
-    # 在进程开始时设置GPU
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-    print(f"🚀 进程 {os.getpid()}: 使用GPU {gpu_id}")
+    process_id = os.getpid()
+    print(f"📝 进程 {process_id}: 处理 {len(task_regions)} 个区域")
     
-    # 总计时开始（包含初始化和预热时间）
-    total_start_time = time.time()
+    # 获取已初始化的OCR实例
+    ocr = get_ocr_instance()
+    if ocr is None:
+        print(f"❌ 进程 {process_id}: OCR实例未初始化")
+        raise RuntimeError(f"进程 {process_id} 中的OCR实例未初始化")
     
-    # 延迟导入，避免在主进程中初始化
-    from ultrafast_ocr.core import UltraFastOCR
-    
-    # 创建OCR实例
-    print(f"🔧 进程 {os.getpid()}: 初始化OCR Worker...")
-    ocr = UltraFastOCR()
-    
-    # 如果是第一张图像，进行预热
-    if is_first_image:
-        print(f"🔥 进程 {os.getpid()}: 第一张图像，开始预热...")
-        warmup_start = time.time()
-        
-        # 创建预热图像
-        warmup_images = []
-        for i in range(3):
-            h, w = (32 + i*16, 100 + i*50)
-            warmup_img = np.ones((h, w, 3), dtype=np.uint8) * 255
-            cv2.putText(warmup_img, f"warmup{i}", (10, h//2), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-            warmup_images.append(warmup_img)
-        
-        # 预热推理
-        warmup_times = []
-        for warmup_img in warmup_images:
-            for _ in range(2):  # 每种图像预热2次
-                warmup_time_start = time.time()
-                _ = ocr.recognize_single_line(warmup_img)
-                warmup_time = (time.time() - warmup_time_start) * 1000
-                warmup_times.append(warmup_time)
-        
-        warmup_duration = (time.time() - warmup_start) * 1000
-        print(f"🔥 进程 {os.getpid()}: 预热完成 ({warmup_duration:.1f}ms)")
-        print(f"     预热效果: {warmup_times[0]:.1f}ms -> {warmup_times[-1]:.1f}ms")
+    print(f"✅ 进程 {process_id}: 使用已初始化的OCR实例（无需重新加载模型）")
     
     # 开始处理实际任务
     gpu_start_time = time.time()
     local_results = []
     region_times = []
-    
-    print(f"📝 进程 {os.getpid()}: 开始处理 {len(task_regions)} 个区域")
     
     for i, region in enumerate(task_regions):
         # 从图像中裁剪区域
@@ -114,28 +128,21 @@ def process_gpu_task_persistent(args):
               if len(text) > 30 else
               f"   [进程{os.getpid()}|GPU{gpu_id}] ({i+1}/{len(task_regions)}) {region.label}: {text} ({region_time:.1f}ms)")
         
-        # 显示预热效果
-        if i == 0 and is_first_image and region_time < 100:
-            print(f"   ✅ 预热成功！首次识别仅耗时 {region_time:.1f}ms")
     
     gpu_processing_time = (time.time() - gpu_start_time) * 1000
-    total_time_with_init = (time.time() - total_start_time) * 1000
     
-    print(f"🏁 进程 {os.getpid()}: 处理完成")
-    print(f"     纯识别时间: {gpu_processing_time:.1f}ms")
-    if is_first_image:
-        print(f"     总时间(含预热): {total_time_with_init:.1f}ms")
+    print(f"🏁 进稌 {process_id}: 处理完成")
+    print(f"     识别时间: {gpu_processing_time:.1f}ms （无模型初始化开销）")
     
     return {
         'results': local_results,
         'gpu_id': gpu_id,
         'total_time': gpu_processing_time,
-        'total_time_with_init': total_time_with_init,
+        'total_time_with_init': gpu_processing_time,  # 现在没有初始化开销
         'region_times': region_times,
         'num_regions': len(task_regions),
         'process_id': os.getpid(),
-        'avg_time_per_region': gpu_processing_time / len(task_regions) if task_regions else 0,
-        'is_first_image': is_first_image
+        'avg_time_per_region': gpu_processing_time / len(task_regions) if task_regions else 0
     }
 
 class PersistentOCRManager:
@@ -151,7 +158,8 @@ class PersistentOCRManager:
         """
         self.gpu_ids = gpu_ids or [0]
         self.use_process_pool = use_process_pool
-        self.first_image_processed = False
+        self.process_pool = None
+        self.pool_initialized = False
         
         print(f"🚀 初始化持久化OCR管理器")
         print(f"   使用GPU: {self.gpu_ids}")
@@ -160,99 +168,12 @@ class PersistentOCRManager:
         
         if use_process_pool:
             print(f"   ✅ 每个GPU在独立进程中运行，真正并行")
+            print(f"   💾 模型将在进程首次调用时初始化，后续复用")
         else:
             print(f"   ⚠️ 线程池模式，可能存在GPU环境变量冲突")
     
-    def _get_or_create_ocr_worker(self, gpu_id: int):
-        """获取或创建OCR工作器（懒加载）"""
-        if gpu_id not in self.ocr_workers:
-            print(f"🔧 首次创建GPU {gpu_id}的OCR实例...")
-            
-            # 设置GPU环境
-            import os
-            original_cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
-            os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-            
-            try:
-                from ultrafast_ocr.core import UltraFastOCR
-                ocr_instance = UltraFastOCR()
-                self.ocr_workers[gpu_id] = ocr_instance
-                self.is_warmed_up[gpu_id] = False
-                
-                print(f"✅ GPU {gpu_id}的OCR实例创建完成")
-                
-                # 恢复环境变量
-                if original_cuda_visible:
-                    os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible
-                else:
-                    os.environ.pop('CUDA_VISIBLE_DEVICES', None)
-                    
-            except Exception as e:
-                print(f"❌ GPU {gpu_id}的OCR创建失败: {e}")
-                # 恢复环境变量
-                if original_cuda_visible:
-                    os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible
-                else:
-                    os.environ.pop('CUDA_VISIBLE_DEVICES', None)
-                raise
-        
-        return self.ocr_workers[gpu_id]
     
-    def _warmup_ocr_if_needed(self, gpu_id: int):
-        """预热OCR模型（线程安全）"""
-        with self.warmup_lock:
-            if self.is_warmed_up.get(gpu_id, False):
-                return  # 已经预热过
-            
-            print(f"🔥 开始预热GPU {gpu_id}的OCR模型...")
-            start_time = time.time()
-            
-            ocr = self._get_or_create_ocr_worker(gpu_id)
-            
-            # 创建预热图像
-            warmup_images = []
-            for i in range(3):  # 3种不同大小的预热图像
-                h, w = (32 + i*16, 100 + i*50)  # 不同尺寸
-                img = np.ones((h, w, 3), dtype=np.uint8) * 255
-                cv2.putText(img, f"warmup{i}", (10, h//2), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-                warmup_images.append(img)
-            
-            # 预热推理
-            warmup_times = []
-            for i, img in enumerate(warmup_images):
-                for round_idx in range(2):  # 每种图像预热2次
-                    warmup_start = time.time()
-                    _ = ocr.recognize_single_line(img)
-                    warmup_time = (time.time() - warmup_start) * 1000
-                    warmup_times.append(warmup_time)
-                    
-                    if i == 0 and round_idx == 0:
-                        first_warmup_time = warmup_time
-            
-            total_warmup_time = (time.time() - start_time) * 1000
-            avg_warmup_time = sum(warmup_times[-3:]) / 3  # 最后3次的平均时间
-            
-            self.is_warmed_up[gpu_id] = True
-            
-            print(f"🔥 GPU {gpu_id}预热完成:")
-            print(f"     首次预热: {first_warmup_time:.1f}ms")
-            print(f"     最终平均: {avg_warmup_time:.1f}ms")
-            print(f"     总预热时间: {total_warmup_time:.1f}ms")
-            print(f"     ✅ 后续识别将保持 {avg_warmup_time:.1f}ms 左右的速度")
     
-    def _async_warmup_unused_gpus(self, exclude_gpu: int):
-        """异步预热其他未使用的GPU"""
-        def warmup_worker():
-            for gpu_id in self.gpu_ids:
-                if gpu_id != exclude_gpu and not self.is_warmed_up.get(gpu_id, False):
-                    try:
-                        self._warmup_ocr_if_needed(gpu_id)
-                    except Exception as e:
-                        print(f"⚠️ 异步预热GPU {gpu_id}失败: {e}")
-        
-        # 在后台线程中预热其他GPU
-        threading.Thread(target=warmup_worker, daemon=True).start()
     
     def process_image_with_yolo_ocr(self, 
                                    image: np.ndarray, 
@@ -277,14 +198,6 @@ class PersistentOCRManager:
             return []
         
         print(f"   📍 YOLO检测到 {len(yolo_detections)} 个文本区域")
-        
-        # 是否为第一张图像
-        is_first_image = not self.first_image_processed
-        if is_first_image:
-            print(f"   🎯 首张图像，启用预热策略...")
-            self.first_image_processed = True
-        else:
-            print(f"   ⚡ 非首张图像，享受预热效果...")
         
         # 创建Region对象
         region_objs = []
@@ -311,10 +224,10 @@ class PersistentOCRManager:
         
         if self.use_process_pool:
             # 使用进程池 - 真正的GPU并行
-            results_dict = self._process_with_process_pool(image, gpu_tasks, is_first_image)
+            results_dict = self._process_with_process_pool(image, gpu_tasks)
         else:
             # 使用线程池 - 可能有GPU冲突
-            results_dict = self._process_with_thread_pool(image, gpu_tasks, is_first_image)
+            results_dict = self._process_with_thread_pool(image, gpu_tasks)
         
         # 按原始顺序排列结果
         results = [results_dict.get(i, "") for i in range(len(region_objs))]
@@ -326,56 +239,82 @@ class PersistentOCRManager:
         print(f"   ⏱️ 总耗时: {total_time:.1f}ms")
         print(f"   📊 平均每区域: {ocr_time/len(region_objs):.1f}ms")
         
-        if image_index > 0:
-            print(f"   ✅ 第{image_index+1}张图像享受预热效果！")
-        
         return results
     
-    def _process_with_process_pool(self, image: np.ndarray, gpu_tasks: List[List[Region]], is_first_image: bool) -> dict:
-        """使用进程池处理（推荐，真正并行）"""
+    def _get_or_create_process_pool(self):
+        """获取或创建持久化进程池"""
+        if self.process_pool is None or not self.pool_initialized:
+            print(f"   🚀 创建持久化进程池...")
+            
+            # 为每个GPU创建一个进程，并初始化OCR实例
+            max_workers = len(self.gpu_ids)
+            self.process_pool = ProcessPoolExecutor(max_workers=max_workers)
+            
+            # 提前初始化所有进程的OCR实例
+            print(f"   🔧 预初始化 {len(self.gpu_ids)} 个GPU进程...")
+            init_futures = []
+            for gpu_id in self.gpu_ids:
+                future = self.process_pool.submit(init_worker_process, gpu_id)
+                init_futures.append(future)
+            
+            # 等待所有初始化完成
+            for future in init_futures:
+                try:
+                    future.result(timeout=30)  # 30秒超时
+                except Exception as e:
+                    print(f"   ❌ 进程初始化失败: {e}")
+                    raise
+            
+            self.pool_initialized = True
+            print(f"   ✅ 所有GPU进程初始化完成，模型已常驻内存")
+        
+        return self.process_pool
+    
+    def _process_with_process_pool(self, image: np.ndarray, gpu_tasks: List[List[Region]]) -> dict:
+        """使用持久化进程池处理（真正持久化）"""
         # 准备进程池参数
         process_args = []
         for i, (gpu_id, task_regions) in enumerate(zip(self.gpu_ids, gpu_tasks)):
             if task_regions:  # 只处理有任务的GPU
-                process_args.append((i, gpu_id, image, task_regions, is_first_image))
+                process_args.append((i, gpu_id, image, task_regions))
         
         results_dict = {}
         gpu_time_stats = {}
         
-        print(f"   🚀 启动 {len(process_args)} 个GPU进程...")
-        
-        with ProcessPoolExecutor(max_workers=len(process_args)) as executor:
-            # 提交任务到进程池
-            future_to_args = {
-                executor.submit(process_gpu_task_persistent, args): args 
-                for args in process_args
-            }
+        # 使用持久化进程池
+        executor = self._get_or_create_process_pool()
+        print(f"   ⚡ 使用已初始化的进程池处理 {len(process_args)} 个任务...")
+        # 提交任务到持久化进程池
+        future_to_args = {
+            executor.submit(process_gpu_task_persistent, args): args 
+            for args in process_args
+        }
             
-            # 收集结果
-            for future in as_completed(future_to_args):
-                args = future_to_args[future]
-                worker_id, gpu_id, _, _, _ = args
+        # 收集结果
+        for future in as_completed(future_to_args):
+            args = future_to_args[future]
+            _, gpu_id, _, _ = args
+            
+            try:
+                gpu_result = future.result()
+                process_id = gpu_result['process_id']
                 
-                try:
-                    gpu_result = future.result()
-                    process_id = gpu_result['process_id']
+                print(f"   ✅ GPU {gpu_id} (进程 {process_id}) 完成")
+                
+                # 保存时间统计
+                gpu_time_stats[f'GPU_{gpu_id}'] = {
+                    'total_time_ms': gpu_result['total_time'],
+                    'num_regions': gpu_result['num_regions'],
+                    'avg_time_ms': gpu_result['avg_time_per_region'],
+                    'process_id': process_id
+                }
+                
+                # 保存识别结果
+                for region_idx, result in gpu_result['results']:
+                    results_dict[region_idx] = result.text
                     
-                    print(f"   ✅ GPU {gpu_id} (进程 {process_id}) 完成")
-                    
-                    # 保存时间统计
-                    gpu_time_stats[f'GPU_{gpu_id}'] = {
-                        'total_time_ms': gpu_result['total_time'],
-                        'num_regions': gpu_result['num_regions'],
-                        'avg_time_ms': gpu_result['avg_time_per_region'],
-                        'process_id': process_id
-                    }
-                    
-                    # 保存识别结果
-                    for region_idx, result in gpu_result['results']:
-                        results_dict[region_idx] = result.text
-                        
-                except Exception as e:
-                    print(f"   ❌ GPU进程失败: {e}")
+            except Exception as e:
+                print(f"   ❌ GPU进程失败: {e}")
         
         # 显示GPU统计
         if gpu_time_stats:
@@ -383,15 +322,16 @@ class PersistentOCRManager:
             for gpu_name, stats in gpu_time_stats.items():
                 print(f"      {gpu_name}: {stats['num_regions']}区域, "
                       f"平均{stats['avg_time_ms']:.1f}ms/区域 "
-                      f"(进程{stats['process_id']})")
+                      f"(持久化进程{stats['process_id']})")
         
         return results_dict
     
-    def _process_with_thread_pool(self, image: np.ndarray, gpu_tasks: List[List[Region]], is_first_image: bool) -> dict:
+    def _process_with_thread_pool(self, image: np.ndarray, gpu_tasks: List[List[Region]]) -> dict:
         """使用线程池处理（可能有GPU冲突）"""
+        # 避免未使用参数警告
+        _ = image, gpu_tasks
         print("   ⚠️ 使用线程池模式，可能存在GPU环境变量冲突")
-        # 这里可以实现线程池版本，但推荐使用进程池
-        # 为了简化，这里返回空结果，建议始终使用进程池
+        print("   🚧 线程池功能未实现，请使用 use_process_pool=True")
         return {}
     
     def batch_process_images(self, 
@@ -427,8 +367,8 @@ class PersistentOCRManager:
         
         return all_results
     
-    def get_warmup_status(self):
-        """获取预热状态"""
+    def get_status(self):
+        """获取管理器状态"""
         return {
             f"GPU_{gpu_id}": f"进程并发模式"
             for gpu_id in self.gpu_ids
@@ -456,7 +396,7 @@ class PersistentOCRManager:
 def demo_persistent_ocr():
     """演示持久化OCR管理器的效果"""
     
-    print("🎭 持久化OCR管理器演示")
+    print("🎭 持久化OCR管理器演示 - 真正的模型持久化")
     print("=" * 80)
     
     # 创建测试图像
@@ -503,8 +443,8 @@ def demo_persistent_ocr():
         if len(image_results) > 3:
             print(f"   ... 还有 {len(image_results)-3} 个结果")
     
-    # 显示预热状态
-    print(f"\n🔥 预热状态: {ocr_manager.get_warmup_status()}")
+    # 显示状态
+    print(f"\n📈 管理器状态: {ocr_manager.get_status()}")
     
     return ocr_manager
 
@@ -514,9 +454,9 @@ if __name__ == "__main__":
     
     print("\n" + "=" * 80)
     print("💡 关键优势：")
-    print("1. 模型常驻内存，避免重复初始化")
-    print("2. 第一张图像处理时完成预热")
-    print("3. 第二张图像开始享受高速识别")
-    print("4. 异步预热其他GPU，不影响当前处理")
+    print("1. 各进程中的OCR模型独立初始化")
+    print("2. 真正的多GPU并行处理")
+    print("3. 简化的工作流程，无首张图像判断")
+    print("4. GPU资源隔离，避免冲突")
     print("5. 智能负载均衡，充分利用多GPU")
     print("=" * 80)
